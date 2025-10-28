@@ -1,0 +1,21 @@
+devices:
+  samplerate: 48000
+  chunksize: 1024
+  capture:
+    type: CoreAudio
+    channels: 2
+  playback:
+    type: CoreAudio
+    channels: 2
+
+filters:
+  test:
+    type: Gain
+    parameters:
+      gain: 0
+      inverted: false
+
+pipeline:
+  - type: Filter
+    channels: [0, 1]
+    names: [test]

@@ -1,0 +1,35 @@
+devices:
+  samplerate: 48000
+  chunksize: 1024
+  capture:
+    type: CoreAudio
+    device: "BlackHole 2ch"
+    channels: 2
+  playback:
+    type: CoreAudio
+    device: 'USB Audio CODEC '
+    channels: 2
+pipeline:
+- type: Filter
+  channels:
+  - 0
+  names:
+  - fir_L
+- type: Filter
+  channels:
+  - 1
+  names:
+  - fir_R
+filters:
+  fir_L:
+    type: Conv
+    parameters:
+      type: Wav
+      filename: "/Users/jeremy/Documents/REW/L_CalcTarget_Reduct_FIR-48k.wav"
+      channel: 0
+  fir_R:
+    type: Conv
+    parameters:
+      type: Wav
+      filename: "/Users/jeremy/Documents/REW/R_CalcTarget_Reduct_FIR-48k.wav"
+      channel: 0
