@@ -13,6 +13,12 @@ pipeline:
 - type: Filter
   channels:
   - 0
+  - 1
+  names:
+  - gain_in
+- type: Filter
+  channels:
+  - 0
   names:
   - fir_L
 - type: Filter
@@ -20,16 +26,34 @@ pipeline:
   - 1
   names:
   - fir_R
+- type: Filter
+  channels:
+  - 0
+  - 1
+  names:
+  - gain_out
 filters:
+  gain_in:
+    type: Gain
+    parameters:
+      gain: 6.00
+      scale: dB
+      inverted: false
+  gain_out:
+    type: Gain
+    parameters:
+      gain: 1.53
+      scale: dB
+      inverted: false
   fir_L:
     type: Conv
     parameters:
       type: Wav
-      filename: "/Users/jeremy/Coding/FIRC_0.1.2/GIT/resources/impulse_L.wav"
+      filename: "/Users/jeremy/Coding/FIRC/FIRC_git/resources/impulse_L.wav"
       channel: 0
   fir_R:
     type: Conv
     parameters:
       type: Wav
-      filename: "/Users/jeremy/Coding/FIRC_0.1.2/GIT/resources/impulse_R.wav"
+      filename: "/Users/jeremy/Coding/FIRC/FIRC_git/resources/impulse_R.wav"
       channel: 0
