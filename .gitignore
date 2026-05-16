@@ -26,6 +26,7 @@ var/
 # PyInstaller
 *.manifest
 *.spec
+vendor/
 
 # Installer logs
 pip-log.txt
@@ -38,6 +39,7 @@ htmlcov/
 .coverage
 .coverage.*
 .cache
+.pytest_cache/
 nosetests.xml
 coverage.xml
 *.cover
@@ -60,6 +62,9 @@ venv.bak/
 
 # macOS
 .DS_Store
+
+# Local app crash logs
+firc_crashlog.txt
 
 # IDEs
 .vscode/

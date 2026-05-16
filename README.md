@@ -4,7 +4,9 @@
 
 ##
 
-**FIRC** – a Python application that helps you use **CamillaDSP** for room correction.  Allows you to apply a **FIR (Filter Frequency Impulse Response)** file created from acoustic measurements in software like REW (Room EQ Wizard) between your coreaudio and output, to improve monitoring.
+**FIRC v0.1.4** – a Python application that helps you use **CamillaDSP** for room correction.  Allows you to apply a **FIR (Filter Frequency Impulse Response)** file created from acoustic measurements in software like REW (Room EQ Wizard) between your coreaudio and output, to improve monitoring.
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes. Developer setup notes: [NOTES.md](NOTES.md).
 
 
 <div align="center" style="margin-bottom: 24px;">

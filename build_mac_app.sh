@@ -12,19 +12,14 @@ if [ ! -d "$VENV" ]; then
   $PYTHON -m venv "$VENV"
 fi
 source "$VENV/bin/activate"
+VENV_PY="$(pwd)/$VENV/bin/python"
+APP_VERSION="$("$VENV_PY" -c "from firc import __version__; print(__version__)")"
 
-# --- Install deps 
-pip install --upgrade pip
-pip install -r requirements.txt
+# --- Install deps
+"$VENV_PY" -m pip install --upgrade pip
+"$VENV_PY" -m pip install -r requirements.txt
 
-# --- Prepare icon argument 
-ICON_ARG=()
-if [ -f "$ICON_ICNS" ]; then
-  ICON_ARG=(--icon "$ICON_ICNS")
-fi
-
-# --- Check for required binaries 
-CAMILLADSP_BIN=$(which camilladsp || true)
+# --- Check for optional helper binaries
 SAS_BIN=$(which SwitchAudioSource || true)
 
 # --- Clean previous builds 
@@ -60,11 +55,15 @@ a = Analysis(
     ['$SCRIPT'],
     binaries=[
         (r'$CAMILLADSP_BIN', '.'),
-        (r'$SAS_BIN', '.') if '$SAS_BIN' else (),
+        *([(r'$SAS_BIN', '.')] if '$SAS_BIN' else []),
     ],
     datas=[
         ('resources/config.yml', 'resources'),
+        ('resources/config_bypass.yml', 'resources'),
         ('resources/test_config.yml', 'resources'),
+        ('resources/impulse_L.wav', 'resources'),
+        ('resources/impulse_R.wav', 'resources'),
+        ('resources/images/General.webp', 'resources/images'),
     ],
 )
 pyz = PYZ(a.pure)
@@ -85,25 +84,26 @@ app = BUNDLE(
     icon='${ICON_ICNS}',
     bundle_identifier='com.github.jeremysalwen.firfiltercorrection',
     info_plist={
-        'CFBundleShortVersionString': '1.0.0',
+        'CFBundleShortVersionString': '${APP_VERSION}',
+        'CFBundleVersion': '${APP_VERSION}',
         'NSMicrophoneUsageDescription': 'FIRC needs access to audio input devices.',
     }
 )
 EOL
 
 # --- Build the app 
-python -m PyInstaller --noconfirm "${APP_NAME}.spec"
+"$VENV_PY" -m PyInstaller --noconfirm "${APP_NAME}.spec"
 echo "Build finished: dist/${APP_NAME}.app"
 
-# --- Codesign binaries 
-codesign --force --options runtime --timestamp \
-  --sign "Developer ID Application: JeremyLesniewski" \
-  "dist/$APP_NAME.app/Contents/MacOS/camilladsp"
+# --- Optional codesign
+if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+  codesign --force --options runtime --timestamp \
+    --sign "$CODESIGN_IDENTITY" \
+    "dist/$APP_NAME.app/Contents/MacOS/camilladsp"
 
-codesign --force --options runtime --timestamp \
-  --sign "Developer ID Application: JeremyLesniewski" \
-  "dist/$APP_NAME.app"
-
-
-
-
+  codesign --force --options runtime --timestamp \
+    --sign "$CODESIGN_IDENTITY" \
+    "dist/$APP_NAME.app"
+else
+  echo "Skipping codesign. Set CODESIGN_IDENTITY to sign the app."
+fi

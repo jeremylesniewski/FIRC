@@ -7,7 +7,7 @@ devices:
     channels: 2
   playback:
     type: CoreAudio
-    device: 'USB Audio CODEC '
+    device: 'USB Audio CODEC'
     channels: 2
 pipeline:
 - type: Filter
@@ -36,24 +36,24 @@ filters:
   gain_in:
     type: Gain
     parameters:
-      gain: 6.00
+      gain: 0.00
       scale: dB
       inverted: false
   gain_out:
     type: Gain
     parameters:
-      gain: 1.53
+      gain: 0.00
       scale: dB
       inverted: false
   fir_L:
     type: Conv
     parameters:
       type: Wav
-      filename: "/Users/jeremy/Coding/FIRC/FIRC_git/resources/impulse_L.wav"
+      filename: "resources/impulse_L.wav"
       channel: 0
   fir_R:
     type: Conv
     parameters:
       type: Wav
-      filename: "/Users/jeremy/Coding/FIRC/FIRC_git/resources/impulse_R.wav"
+      filename: "resources/impulse_R.wav"
       channel: 0
