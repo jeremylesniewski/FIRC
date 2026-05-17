@@ -602,7 +602,7 @@ class FIRFilterGUI(tk.Tk):
         except Exception as e:
             self.append_log(f"[PassthroughEngine] init failed: {e}\n")
             self.passthrough = None
-        
+
         try:
             self.level_tap = LevelTap(
                 get_capture_name=lambda: self.cap_var.get(),
@@ -648,7 +648,7 @@ class FIRFilterGUI(tk.Tk):
                 if log:
                     self.append_log("[Passthrough] engine not initialized\n")
                 return False
-            
+
             ok = False
             if self.passthrough.is_active():
                 ok = True
@@ -656,7 +656,7 @@ class FIRFilterGUI(tk.Tk):
                 ok = self.passthrough.restart()
             else:
                 ok = self.passthrough.start()
-            
+
             if ok:
                 self.proc_mode = None
                 self.bypass_var.set("Direct passthrough")
@@ -694,7 +694,8 @@ class FIRFilterGUI(tk.Tk):
 
     def _maintain_audio_path(self):
         now = time.monotonic()
-        if self._recovering_audio or (now - self._last_audio_recover) < 3.0:
+        # CHANGE 1: also bail if camilla is mid-start
+        if self._recovering_audio or self._camilla_starting or (now - self._last_audio_recover) < 3.0:
             return
 
         try:
@@ -997,15 +998,12 @@ class FIRFilterGUI(tk.Tk):
 
     # FIR curve compute (EQ shown)
     def _compute_fir_curve_for_display(self):
-        # sr
         try:
             sr = int(self.sr_var.get() or 48000)
         except Exception:
             sr = 48000
-        # fft len → analyzer size
         nfft = getattr(self.analyzer, "_fft_size", 16384)
 
-        # load L/R
         paths = [self.fir_left_var.get().strip(), self.fir_right_var.get().strip()]
         H_list = []
         for p in paths:
@@ -1015,7 +1013,6 @@ class FIRFilterGUI(tk.Tk):
             if x is None or x.size == 0:
                 self.append_log(f"[FIR] read error {p}\n")
                 continue
-            # light window to reduce ripple
             winN = min(len(x), 8192)
             win = np.hanning(winN)
             xw = x.copy()
@@ -1031,21 +1028,18 @@ class FIRFilterGUI(tk.Tk):
         if not H_list:
             return None, None
 
-        # average transfer
         Havg = np.mean(np.vstack(H_list), axis=0)
         freqs = np.fft.rfftfreq(nfft, 1.0/sr)
         mag = np.abs(Havg)
         mag = np.maximum(mag, 1e-12)
         mag_db = 20.0 * np.log10(mag)
 
-        # normalize at 1 kHz (0 dB ref)
         try:
             k = int(np.argmin(np.abs(freqs - 1000.0)))
             mag_db = mag_db - mag_db[k]
         except Exception:
             pass
 
-        # light smooth (1/6)
         try:
             mag_db = self.analyzer._fractional_octave_power_smooth_fast(freqs, mag_db, fraction=6)
         except Exception:
@@ -1056,6 +1050,9 @@ class FIRFilterGUI(tk.Tk):
     def _start_camilla(self, config_path, mode="correction", show_errors=True):
         if self._camilla_starting:
             self.append_log(f"CamillaDSP start already in progress ({mode}).\n")
+            return False
+        # Don't restart if already running fine
+        if self.proc_mode == "correction" and self.proc is not None and self.proc.poll() is None:
             return False
         cam_bin = which("camilladsp")
         if cam_bin is None:
@@ -1162,6 +1159,8 @@ class FIRFilterGUI(tk.Tk):
     # toggle correction
     def toggle_launch(self):
         if self.proc_mode != 'correction':
+            if self._camilla_starting:
+                return  # already in progress, ignore click
             if not self.write_to_config(show_message=False):
                 self._show_dialog("error", "Missing FIR", "Please select BOTH Left and Right FIR WAV files.")
                 return
@@ -1176,12 +1175,15 @@ class FIRFilterGUI(tk.Tk):
                 except Exception as e:
                     self.append_log(f"[FIR] curve error: {e}\n")
         else:
+            if self._camilla_starting:
+                return
             self._stop_if_running()
             self.proc_mode = None
             self._sync_launch_btn()
-            # clear FIR
-            try: self.analyzer.clear_reference_curve()
-            except Exception: pass
+            try:
+                self.analyzer.clear_reference_curve()
+            except Exception:
+                pass
             self._stop_meter_tap()
             self._ensure_passthrough_audio()
 
@@ -1220,10 +1222,8 @@ class FIRFilterGUI(tk.Tk):
         if self.proc is None or self.proc_mode is None:
             return
 
-        # Check if process is still alive
         rc = self.proc.poll()
         if rc is not None:
-            # Process exited
             self.append_log(f"[CamillaDSP exited with code {rc}] — recovering passthrough…\n")
             self.proc = None
             self.proc_mode = None
@@ -1237,7 +1237,7 @@ class FIRFilterGUI(tk.Tk):
 
     # reader
     def _reader_thread(self, proc, generation):
-        """Read output from CamillaDSP subprocess with timeout detection."""
+        """Read output from CamillaDSP subprocess."""
         if proc is None or proc.stdout is None:
             return
 
@@ -1246,7 +1246,6 @@ class FIRFilterGUI(tk.Tk):
                 if not line:
                     break
                 self.log_queue.put((generation, line))
-            # EOF reached
             rc = proc.poll()
             self.log_queue.put((generation, f"[process stream closed, exit code: {rc}]\n"))
         except Exception as e:
@@ -1286,7 +1285,8 @@ class FIRFilterGUI(tk.Tk):
             self._meter_conv_state = {"left": None, "right": None, "sig": None}
             self._analyzer_conv_state = {"left": None, "right": None, "sig": None}
             if self.proc_mode == "correction":
-                if config_ok:
+                # CHANGE 2: guard against restarting while already starting
+                if config_ok and not self._camilla_starting:
                     self._stop_if_running()
                     self._stop_passthrough()
                     self._start_camilla(CONFIG_INTERNAL_PATH, "correction", show_errors=False)
@@ -1303,6 +1303,9 @@ class FIRFilterGUI(tk.Tk):
                 self._gain_in_label.config(text=f"{gi:+.1f} dB")
             if hasattr(self, "_gain_out_label"):
                 self._gain_out_label.config(text=f"{go:+.1f} dB")
+            # CHANGE 3: push gains to passthrough as plain floats — never call tkinter from audio thread
+            if getattr(self, "passthrough", None):
+                self.passthrough.update_gains(gi, go)
         except Exception:
             pass
         if not self._ready_for_gain_updates:
@@ -1323,13 +1326,13 @@ class FIRFilterGUI(tk.Tk):
             self._stop_passthrough()
         except Exception as e:
             self.append_log(f"[Cleanup] {e}\n")
-        
+
         if self.proc is not None:
             if self._show_dialog("yesno", "Quit", "CamillaDSP is running. Stop and quit?"):
                 self._stop_if_running()
             else:
                 return
-        
+
         try:
             self.destroy()
         except Exception:

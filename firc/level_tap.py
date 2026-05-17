@@ -31,26 +31,28 @@ class LevelTap:
     def stop(self):
         self.running = False
         with self.lock:
+            stream = self.stream
+            self.stream = None
             self._latest = None
+        if stream is not None:
             try:
-                if self.stream:
-                    self.stream.stop()
-                    self.stream.close()
+                stream.stop()
+                stream.close()
             except Exception:
                 pass
-            self.stream = None
 
     def restart(self):
         if not self.running:
             return
         with self.lock:
+            stream = self.stream
+            self.stream = None
+        if stream is not None:
             try:
-                if self.stream:
-                    self.stream.stop()
-                    self.stream.close()
+                stream.stop()
+                stream.close()
             except Exception:
                 pass
-            self.stream = None
         self._open_stream()
 
     def _open_stream(self):

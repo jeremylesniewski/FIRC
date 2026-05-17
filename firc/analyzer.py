@@ -174,8 +174,7 @@ class Analyzer(ttk.LabelFrame):
             self.canvas = FigureCanvasTkAgg(self.fig, master=body)
             self.canvas_widget = self.canvas.get_tk_widget()
             self.canvas_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=(6, 3), pady=(0, 6))
-            self.overlay = tk.Label(self.canvas_widget, text="Output spectrum unavailable", fg="#f0f0f0", bg="#1a1a1a")
-            self.overlay.place_forget()
+    
         else:
             ttk.Label(self, text="Install: pip install numpy sounddevice matplotlib", foreground="orange").pack(fill=tk.X, padx=6, pady=8)
 
@@ -548,12 +547,7 @@ class Analyzer(ttk.LabelFrame):
         if not _PLOT_OK:
             return
         active = self.running and (self.stream is not None or self.get_audio_chunk is not None)
-        if not active:
-            self.overlay.config(text="Analyzer idle")
-            self.overlay.place(relx=0.5, rely=0.5, anchor="center")
-        else:
-            self.overlay.place_forget()
-
+        
     def _on_fft_change(self):
         try:
             self._fft_size = int(self._fft_var.get())

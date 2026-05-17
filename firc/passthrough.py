@@ -20,6 +20,14 @@ class PassthroughEngine:
         self.lock = threading.Lock()
         self._latest = None
         self._last_ok = 0.0
+        # cached as plain floats — safe to read from audio callback without touching tkinter
+        self._gain_in_linear = 1.0
+        self._gain_out_linear = 1.0
+
+    def update_gains(self, gain_in_db, gain_out_db):
+        """Call this from the UI thread whenever gain changes."""
+        self._gain_in_linear = _db_to_linear(gain_in_db)
+        self._gain_out_linear = _db_to_linear(gain_out_db)
 
     def get_latest(self):
         with self.lock:
@@ -41,23 +49,37 @@ class PassthroughEngine:
     def start(self):
         if not _AUDIO_OK or self.running:
             return False
+        # sync gains from tkinter before starting — safe here, called from UI thread
+        try:
+            self._gain_in_linear = _db_to_linear(self.get_gain_in_db())
+            self._gain_out_linear = _db_to_linear(self.get_gain_out_db())
+        except Exception:
+            pass
         self.running = True
         return self._open_stream()
 
     def stop(self):
         self.running = False
         with self.lock:
+            stream = self.stream
+            self.stream = None
             self._latest = None
+        # close outside the lock so the callback can finish cleanly
+        if stream is not None:
             try:
-                if self.stream:
-                    self.stream.stop()
-                    self.stream.close()
+                stream.stop()
+                stream.close()
             except Exception:
                 pass
-            self.stream = None
 
     def restart(self):
         self.stop()
+        # sync gains from tkinter before restarting — safe here, called from UI thread
+        try:
+            self._gain_in_linear = _db_to_linear(self.get_gain_in_db())
+            self._gain_out_linear = _db_to_linear(self.get_gain_out_db())
+        except Exception:
+            pass
         self.running = True
         return self._open_stream()
 
@@ -92,8 +114,9 @@ class PassthroughEngine:
                     x = np.repeat(x, 2, axis=1)
                 x = x[:, :2]
 
-                gain_in = _db_to_linear(self.get_gain_in_db())
-                gain_out = _db_to_linear(self.get_gain_out_db())
+                # read pre-cached floats — never call tkinter from here
+                gain_in = self._gain_in_linear
+                gain_out = self._gain_out_linear
                 pre = x * gain_in
                 post = pre * gain_out
 
