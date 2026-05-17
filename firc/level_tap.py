@@ -56,10 +56,10 @@ class LevelTap:
     def _open_stream(self):
         try:
             sr = int(self.get_samplerate() or 48000)
-        except Exception:
+        except (ValueError, TypeError):
             sr = 48000
         try:
-            cap_name = (self.get_capture_name() or "")
+            cap_name = (self.get_capture_name() or "").strip()
         except Exception:
             cap_name = ""
 
@@ -103,5 +103,5 @@ class LevelTap:
                 callback=cb,
             )
             self.stream.start()
-        except Exception:
+        except Exception as e:
             self.stream = None

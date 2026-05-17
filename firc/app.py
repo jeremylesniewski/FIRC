@@ -10,10 +10,11 @@ import scipy.signal
 
 from . import __version__
 from .analyzer import Analyzer
-from .audio_utils import _db_to_linear, _ensure_impulse_wav, _read_wav_float
+from .audio_utils import _db_to_linear, _read_wav_float
 from .config import _build_yaml_config, _read_yaml_config
 from .deps import _AUDIO_OK, _PLOT_OK, np
 from .level_tap import LevelTap
+from .passthrough import PassthroughEngine
 from .meters import Meter, VerticalMeter
 from .platform_utils import (
     _canonical_device_name,
@@ -25,7 +26,6 @@ from .platform_utils import (
     which,
 )
 from .runtime import (
-    BYPASS_CONFIG_PATH,
     CONFIG_INTERNAL_PATH,
     IMPULSE_L_PATH,
     IMPULSE_R_PATH,
@@ -53,6 +53,11 @@ class FIRFilterGUI(tk.Tk):
         self._sr_apply_in_progress = False
         self._error_dialog_open = False
         self._pending_gain_job = None
+        self.passthrough = None
+        self.level_tap = None
+        self._audio_watchdog_active = False
+        self._last_audio_recover = 0.0
+        self._recovering_audio = False
         self._meter_ir_cache = {"mode": None, "left": None, "right": None, "sig": None}
         self._meter_conv_state = {"left": None, "right": None, "sig": None}
         self._analyzer_conv_state = {"left": None, "right": None, "sig": None}
@@ -222,14 +227,13 @@ class FIRFilterGUI(tk.Tk):
 
         # analyzer
         self.an_frame = ttk.LabelFrame(self.an_container)
-        self.level_tap = None
         self.analyzer = Analyzer(
             self.an_frame,
             get_capture_name=lambda: self.cap_var.get(),
             get_playback_name=lambda: self.play_var.get(),
             get_samplerate=lambda: self.sr_var.get(),
             process_monitor_chunk=self._analyzer_monitor_chunk,
-            get_audio_chunk=lambda: self.level_tap.get_latest() if self.level_tap else None,
+            get_audio_chunk=self._get_monitor_audio_chunk,
         )
         self.analyzer.pack(fill=tk.BOTH, expand=True)
         self._an_visible = False
@@ -361,13 +365,12 @@ class FIRFilterGUI(tk.Tk):
         pre_db = None
         post_db = None
 
-        if getattr(self, "level_tap", None):
-            try:
-                x = self.level_tap.get_latest()
-                if x is not None:
-                    pre_db, post_db = self._measure_live_levels(x)
-            except Exception:
-                pass
+        try:
+            x = self._get_monitor_audio_chunk()
+            if x is not None:
+                pre_db, post_db = self._measure_live_levels(x)
+        except Exception:
+            pass
 
         self.pre_meter.draw_meter(pre_db, pre_db)
         self.post_meter.draw_meter(post_db, post_db)
@@ -381,10 +384,19 @@ class FIRFilterGUI(tk.Tk):
 
         self.after(33, self._update_bottom_meter)
 
+    def _get_monitor_audio_chunk(self):
+        if self.proc_mode == "correction":
+            if getattr(self, "level_tap", None):
+                return self.level_tap.get_latest()
+            return None
+        if getattr(self, "passthrough", None):
+            return self.passthrough.get_latest()
+        return None
+
     def _active_meter_paths(self):
         if self.proc_mode == "correction":
             return self.fir_left_var.get().strip(), self.fir_right_var.get().strip()
-        return str(IMPULSE_L_PATH), str(IMPULSE_R_PATH)
+        return "", ""
 
     def _get_active_irs(self):
         left_path, right_path = self._active_meter_paths()
@@ -490,7 +502,7 @@ class FIRFilterGUI(tk.Tk):
                 text="Active",
                 style="Running.TButton"
             )
-        elif self.proc_mode == 'bypass':
+        elif getattr(self, "passthrough", None) and self.passthrough.is_active():
             self.launch_btn.config(
                 text="Bypassed",
                 style="Bypass.TButton"
@@ -564,32 +576,169 @@ class FIRFilterGUI(tk.Tk):
             return False
 
     def _finish_startup(self):
-        self._ensure_bypass_config()
+        try:
+            self._init_audio_engines()
+            self._ensure_passthrough_audio(log=True)
+            self._schedule_audio_watchdog()
+            self.append_log("Ready.\n")
+            self._ready_for_gain_updates = True
+            self.update_idletasks()
+            self._base_w = self.winfo_width()
+            self._base_h = self.winfo_height()
+            self._apply_window_mode("none")
+        except Exception as e:
+            self.append_log(f"[Startup error] {e}\n")
+            self._ready_for_gain_updates = True
+
+    def _init_audio_engines(self):
+        try:
+            self.passthrough = PassthroughEngine(
+                get_capture_name=lambda: self.cap_var.get(),
+                get_playback_name=lambda: self.play_var.get(),
+                get_samplerate=lambda: self.sr_var.get(),
+                get_gain_in_db=lambda: self._gain_in_db.get(),
+                get_gain_out_db=lambda: self._gain_out_db.get(),
+            )
+        except Exception as e:
+            self.append_log(f"[PassthroughEngine] init failed: {e}\n")
+            self.passthrough = None
+        
         try:
             self.level_tap = LevelTap(
                 get_capture_name=lambda: self.cap_var.get(),
                 get_playback_name=lambda: self.play_var.get(),
                 get_samplerate=lambda: self.sr_var.get(),
             )
-            self.level_tap.start()
         except Exception as e:
-            self.append_log(f"[LevelTap] init warning: {e}\n")
-        self._auto_start_bypass()
-        self.append_log("Ready.\n")
-        self._ready_for_gain_updates = True
-        self.update_idletasks()
-        self._base_w = self.winfo_width()
-        self._base_h = self.winfo_height()
-        self._apply_window_mode("none")
+            self.append_log(f"[LevelTap] init failed: {e}\n")
+            self.level_tap = None
 
-    def _restart_level_tap(self):
-        if not getattr(self, "level_tap", None):
+    def _stop_passthrough(self):
+        if getattr(self, "passthrough", None):
+            self.passthrough.stop()
+
+    def _stop_meter_tap(self):
+        if getattr(self, "level_tap", None):
+            self.level_tap.stop()
+
+    def _start_meter_tap(self):
+        if getattr(self, "level_tap", None) is None:
             return
         try:
             self.level_tap.stop()
             self.level_tap.start()
         except Exception as e:
-            self.append_log(f"[LevelTap] restart warning: {e}\n")
+            self.append_log(f"[Meter tap] restart failed: {e}\n")
+
+    def _ensure_passthrough_audio(self, log=False):
+        """Direct capture→playback (no CamillaDSP). Default whenever not in correction."""
+        if self.proc_mode == "correction":
+            return False
+        self._stop_if_running()
+        self._stop_meter_tap()
+        cap, play = self._resolve_selected_devices()
+        if not cap or not play:
+            self.bypass_var.set("Select capture + playback")
+            if log:
+                self.append_log("[Passthrough] waiting for devices\n")
+            self._sync_launch_btn()
+            return False
+        try:
+            if getattr(self, "passthrough", None) is None:
+                if log:
+                    self.append_log("[Passthrough] engine not initialized\n")
+                return False
+            
+            ok = False
+            if self.passthrough.is_active():
+                ok = True
+            elif self.passthrough.running:
+                ok = self.passthrough.restart()
+            else:
+                ok = self.passthrough.start()
+            
+            if ok:
+                self.proc_mode = None
+                self.bypass_var.set("Direct passthrough")
+                if log:
+                    self.append_log("[Passthrough] capture → playback active\n")
+            else:
+                self.bypass_var.set("Passthrough failed")
+                if log:
+                    self.append_log("[Passthrough] could not open audio stream\n")
+        except Exception as e:
+            self.bypass_var.set(f"Passthrough error: {e}")
+            if log:
+                self.append_log(f"[Passthrough] error: {e}\n")
+            ok = False
+        finally:
+            self._sync_launch_btn()
+        return ok
+
+    def _schedule_audio_watchdog(self):
+        if self._audio_watchdog_active:
+            return
+        self._audio_watchdog_active = True
+        self.after(2000, self._audio_watchdog_tick)
+
+    def _audio_watchdog_tick(self):
+        self._audio_watchdog_active = False
+        try:
+            if self.winfo_exists():
+                self._maintain_audio_path()
+        except Exception as e:
+            self.append_log(f"[Audio watchdog] error: {e}\n")
+        finally:
+            if self.winfo_exists():
+                self._schedule_audio_watchdog()
+
+    def _maintain_audio_path(self):
+        now = time.monotonic()
+        if self._recovering_audio or (now - self._last_audio_recover) < 3.0:
+            return
+
+        try:
+            if self.proc_mode == "correction":
+                if self.proc is not None and self.proc.poll() is None:
+                    return
+                self._recovering_audio = True
+                self.append_log("[Watchdog] correction offline — restarting CamillaDSP…\n")
+                if self.write_to_config(show_message=False):
+                    self._stop_passthrough()
+                    self._start_camilla(CONFIG_INTERNAL_PATH, "correction", show_errors=False)
+                else:
+                    self.proc_mode = None
+                    self._ensure_passthrough_audio()
+                self._last_audio_recover = now
+                self._recovering_audio = False
+                return
+
+            if self.proc is not None:
+                self._stop_if_running()
+
+            passthrough_ok = (
+                getattr(self, "passthrough", None) is not None
+                and self.passthrough.is_active()
+                and self.passthrough.seconds_since_audio() <= 4.0
+            )
+            if not passthrough_ok:
+                self._recovering_audio = True
+                self.append_log("[Watchdog] passthrough offline — restarting…\n")
+                self._ensure_passthrough_audio(log=False)
+                self._last_audio_recover = now
+                self._recovering_audio = False
+        except Exception as e:
+            self.append_log(f"[Watchdog error] {e}\n")
+            self._recovering_audio = False
+
+    def _restart_audio_after_device_change(self, force_correction=False):
+        if force_correction or self.proc_mode == "correction":
+            self._stop_if_running()
+            if self.write_to_config(show_message=False):
+                self._stop_passthrough()
+                self._start_camilla(CONFIG_INTERNAL_PATH, "correction", show_errors=False)
+        else:
+            self._ensure_passthrough_audio()
 
     # devices / SR
     def refresh_devices(self, mode="all"):
@@ -745,8 +894,7 @@ class FIRFilterGUI(tk.Tk):
                 pass
 
         self._resolve_selected_devices()
-        if getattr(self, "level_tap", None):
-            self._restart_level_tap()
+        self._restart_audio_after_device_change()
         if on_done:
             on_done()
 
@@ -788,12 +936,10 @@ class FIRFilterGUI(tk.Tk):
             return
         if self._sr_apply_in_progress:
             return
-        active_mode = self.proc_mode
-        was_running = self.proc is not None
-        if was_running:
+        was_correction = self.proc_mode == "correction"
+        if self.proc is not None:
             self._stop_if_running()
-            self.proc_mode = None
-            self._sync_launch_btn()
+        self._stop_passthrough()
 
         self._sr_apply_in_progress = True
         self.sr_status_var.set("Applying...")
@@ -801,36 +947,34 @@ class FIRFilterGUI(tk.Tk):
         play = self.play_var.get()
         threading.Thread(
             target=self._apply_sample_rate_worker,
-            args=(new_rate, cap, play, active_mode, was_running),
+            args=(new_rate, cap, play, was_correction),
             daemon=True,
             name="ApplySampleRate",
         ).start()
 
-    def _apply_sample_rate_worker(self, new_rate, cap_name, play_name, active_mode, was_running):
+    def _apply_sample_rate_worker(self, new_rate, cap_name, play_name, was_correction):
         errs = []
         for dev_name, label in ((cap_name, "Input"), (play_name, "Output")):
             if dev_name:
                 ok, msg = self.set_device_sample_rate(dev_name, new_rate)
                 if not ok:
                     errs.append(f"{label}: {msg}")
-        self.after(0, lambda: self._finish_apply_sample_rate(new_rate, errs, active_mode, was_running))
+        self.after(0, lambda: self._finish_apply_sample_rate(new_rate, errs, was_correction))
 
-    def _finish_apply_sample_rate(self, new_rate, errs, active_mode, was_running):
+    def _finish_apply_sample_rate(self, new_rate, errs, was_correction):
         self._sr_apply_in_progress = False
         if errs:
             self.sr_status_var.set("Some failed!")
             self._show_dialog("error", "Sample Rate", "\n".join(errs))
         else:
             self.sr_status_var.set(f"{new_rate}Hz set")
-        self._restart_level_tap()
+        if was_correction:
+            self._restart_audio_after_device_change(force_correction=True)
+        else:
+            self._ensure_passthrough_audio()
         if _AUDIO_OK and _PLOT_OK and self._an_visible:
             self.analyzer.stop()
             self.analyzer.start()
-        if was_running:
-            if active_mode == "correction":
-                self.toggle_launch()
-            else:
-                self._auto_start_bypass()
 
     # FIR pickers
     def browse_fir_separate(self, channel):
@@ -850,34 +994,6 @@ class FIRFilterGUI(tk.Tk):
             self._show_dialog("info", "Switched", msg)
         else:
             self._show_dialog("warning", "Notice", msg)
-
-    # bypass cfg
-    def _ensure_bypass_config(self):
-        try: sr = int(self.sr_var.get() or 48000)
-        except Exception: sr = 48000
-        _ensure_impulse_wav(IMPULSE_L_PATH, sr)
-        _ensure_impulse_wav(IMPULSE_R_PATH, sr)
-        cap, play = self._resolve_selected_devices()
-        if not cap or not play:
-            self.append_log("Bypass config skipped: no capture/playback device selected.\n")
-            return False
-        try: gi = float(self._gain_in_db.get())
-        except Exception: gi = 0.0
-        try: go = float(self._gain_out_db.get())
-        except Exception: go = 0.0
-
-        impulse_l = str(IMPULSE_L_PATH)
-        impulse_r = str(IMPULSE_R_PATH)
-        try:
-            yaml_bypass = _build_yaml_config(sr, cap, play, impulse_l, impulse_r, gi, go)
-            BYPASS_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with open(BYPASS_CONFIG_PATH, "w", encoding="utf-8") as f:
-                f.write(yaml_bypass)
-            self.append_log("Bypass config written.\n")
-            return True
-        except Exception as e:
-            self.append_log(f"Bypass config write failed: {e}\n")
-            return False
 
     # FIR curve compute (EQ shown)
     def _compute_fir_curve_for_display(self):
@@ -937,17 +1053,7 @@ class FIRFilterGUI(tk.Tk):
 
         return freqs, mag_db
 
-    def _auto_start_bypass(self):
-        if self.proc is not None:
-            return
-        cam_bin = which("camilladsp")
-        if cam_bin is None:
-            self.append_log("Bypass not started: camilladsp not found.\n")
-            return
-        if self._ensure_bypass_config():
-            self._start_camilla(BYPASS_CONFIG_PATH, "bypass", show_errors=False)
-
-    def _start_camilla(self, config_path, mode, show_errors=True):
+    def _start_camilla(self, config_path, mode="correction", show_errors=True):
         if self._camilla_starting:
             self.append_log(f"CamillaDSP start already in progress ({mode}).\n")
             return False
@@ -967,15 +1073,17 @@ class FIRFilterGUI(tk.Tk):
                 self.append_log(f"{mode.capitalize()} not started: {msg}\n")
             return False
 
-        self._resolve_selected_devices()
-        if mode == "correction":
-            if not self.write_to_config(show_message=False):
-                if show_errors:
-                    self._show_dialog("error", "Missing FIR", "Please select BOTH Left and Right FIR WAV files.")
-                return False
-        else:
-            self._ensure_bypass_config()
+        if mode != "correction":
+            return False
 
+        self._resolve_selected_devices()
+        if not self.write_to_config(show_message=False):
+            if show_errors:
+                self._show_dialog("error", "Missing FIR", "Please select BOTH Left and Right FIR WAV files.")
+            return False
+
+        self._stop_passthrough()
+        self._stop_meter_tap()
         self._camilla_starting = True
         threading.Thread(
             target=self._start_camilla_worker,
@@ -1028,14 +1136,16 @@ class FIRFilterGUI(tk.Tk):
                 self.proc = None
                 self.proc_mode = None
                 self._sync_launch_btn()
-                self._auto_start_bypass()
+                self._ensure_passthrough_audio()
                 return
 
             self.proc = proc
-            self.proc_mode = mode
+            self.proc_mode = "correction"
             self.proc_start_time = time.time()
             self._sync_launch_btn()
-            self.append_log(f"Started CamillaDSP ({mode})\n")
+            self.bypass_var.set("CamillaDSP correction")
+            self.append_log("Started CamillaDSP (correction)\n")
+            self._start_meter_tap()
             self.proc_thread = threading.Thread(
                 target=self._reader_thread,
                 args=(proc, generation),
@@ -1055,6 +1165,7 @@ class FIRFilterGUI(tk.Tk):
             if not self.write_to_config(show_message=False):
                 self._show_dialog("error", "Missing FIR", "Please select BOTH Left and Right FIR WAV files.")
                 return
+            self._stop_passthrough()
             if self._start_camilla(CONFIG_INTERNAL_PATH, "correction", show_errors=True):
                 try:
                     freqs, mag_db = self._compute_fir_curve_for_display()
@@ -1071,7 +1182,8 @@ class FIRFilterGUI(tk.Tk):
             # clear FIR
             try: self.analyzer.clear_reference_curve()
             except Exception: pass
-            self._auto_start_bypass()
+            self._stop_meter_tap()
+            self._ensure_passthrough_audio()
 
     # stop camilla
     def _stop_if_running(self):
@@ -1112,20 +1224,15 @@ class FIRFilterGUI(tk.Tk):
         rc = self.proc.poll()
         if rc is not None:
             # Process exited
-            self.append_log(f"[CamillaDSP process exited unexpectedly with code {rc}]\n")
+            self.append_log(f"[CamillaDSP exited with code {rc}] — recovering passthrough…\n")
             self.proc = None
             self.proc_mode = None
             self._sync_launch_btn()
-            self._show_dialog(
-                "warning",
-                "Process Exited",
-                f"CamillaDSP exited with code {rc}. Check logs for details.",
-            )
-            self._auto_start_bypass()
+            self._stop_meter_tap()
+            self._ensure_passthrough_audio()
             return
 
-        # Reschedule check
-        if self.proc_mode in ('correction', 'bypass'):
+        if self.proc_mode == "correction":
             self._schedule_process_monitor()
 
     # reader
@@ -1171,36 +1278,33 @@ class FIRFilterGUI(tk.Tk):
         else:
             self._apply_window_mode("io")
 
-    def _restart_camilla_for_current_mode(self):
-        active_mode = self.proc_mode
-        if active_mode not in ("correction", "bypass"):
-            return
-        self._stop_if_running()
-        self.proc_mode = None
-        self._sync_launch_btn()
-        if active_mode == "correction":
-            self.toggle_launch()
-        else:
-            self._auto_start_bypass()
-
     def _apply_gain_update(self):
         self._pending_gain_job = None
-        config_ok = self.write_to_config(show_message=False)
-        self._ensure_bypass_config()
-        self._meter_ir_cache["sig"] = None
-        self._meter_conv_state = {"left": None, "right": None, "sig": None}
-        self._analyzer_conv_state = {"left": None, "right": None, "sig": None}
-        if self.proc_mode == "correction":
-            if config_ok:
-                self._restart_camilla_for_current_mode()
-        elif self.proc_mode == "bypass":
-            self._restart_camilla_for_current_mode()
+        try:
+            config_ok = self.write_to_config(show_message=False)
+            self._meter_ir_cache["sig"] = None
+            self._meter_conv_state = {"left": None, "right": None, "sig": None}
+            self._analyzer_conv_state = {"left": None, "right": None, "sig": None}
+            if self.proc_mode == "correction":
+                if config_ok:
+                    self._stop_if_running()
+                    self._stop_passthrough()
+                    self._start_camilla(CONFIG_INTERNAL_PATH, "correction", show_errors=False)
+            else:
+                self._ensure_passthrough_audio()
+        except Exception as e:
+            self.append_log(f"[Gain update error] {e}\n")
 
     def _on_gain_change(self, _=None):
-        gi = self._gain_in_db.get()
-        go = self._gain_out_db.get()
-        self._gain_in_label.config(text=f"{gi:+.1f} dB")
-        self._gain_out_label.config(text=f"{go:+.1f} dB")
+        try:
+            gi = self._gain_in_db.get()
+            go = self._gain_out_db.get()
+            if hasattr(self, "_gain_in_label"):
+                self._gain_in_label.config(text=f"{gi:+.1f} dB")
+            if hasattr(self, "_gain_out_label"):
+                self._gain_out_label.config(text=f"{go:+.1f} dB")
+        except Exception:
+            pass
         if not self._ready_for_gain_updates:
             return
         if self._pending_gain_job is not None:
@@ -1213,13 +1317,20 @@ class FIRFilterGUI(tk.Tk):
 
     def on_close(self):
         try:
-            if hasattr(self, "analyzer"): self.analyzer.stop()
-            if getattr(self, "level_tap", None):
-                self.level_tap.stop()
-        except Exception: pass
+            if hasattr(self, "analyzer") and self.analyzer:
+                self.analyzer.stop()
+            self._stop_meter_tap()
+            self._stop_passthrough()
+        except Exception as e:
+            self.append_log(f"[Cleanup] {e}\n")
+        
         if self.proc is not None:
             if self._show_dialog("yesno", "Quit", "CamillaDSP is running. Stop and quit?"):
                 self._stop_if_running()
             else:
                 return
-        self.destroy()
+        
+        try:
+            self.destroy()
+        except Exception:
+            pass

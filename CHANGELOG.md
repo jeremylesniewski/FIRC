@@ -22,9 +22,11 @@ Maintenance release: same app, better structure and fewer macOS papercuts. Not a
 
 ### Fixed
 
+- Bypass uses **direct passthrough** (sounddevice), not CamillaDSP; audio on launch
+- **Watchdog** auto-restarts passthrough or correction if the path stops
 - UI freezes on Refresh / Apply / Start
 - CamillaDSP “playback device not found”
-- Stuck error popups; bypass fallback when correction dies
+- Stuck error popups; passthrough fallback when correction dies
 
 ---
 
