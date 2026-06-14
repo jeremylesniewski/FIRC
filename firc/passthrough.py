@@ -7,7 +7,7 @@ from .platform_utils import _sd_find_device_index
 
 
 class PassthroughEngine:
-    """Capture → gain → playback in Python (bypass, no CamillaDSP)."""
+
 
     def __init__(self, get_capture_name, get_playback_name, get_samplerate, get_gain_in_db, get_gain_out_db):
         self.get_capture_name = get_capture_name
@@ -20,12 +20,10 @@ class PassthroughEngine:
         self.lock = threading.Lock()
         self._latest = None
         self._last_ok = 0.0
-        # cached as plain floats — safe to read from audio callback without touching tkinter
         self._gain_in_linear = 1.0
         self._gain_out_linear = 1.0
 
     def update_gains(self, gain_in_db, gain_out_db):
-        """Call this from the UI thread whenever gain changes."""
         self._gain_in_linear = _db_to_linear(gain_in_db)
         self._gain_out_linear = _db_to_linear(gain_out_db)
 
@@ -50,7 +48,6 @@ class PassthroughEngine:
         with self.lock:
             if not _AUDIO_OK or self.running:
                 return False
-            # sync gains from tkinter before starting — safe here, called from UI thread
             try:
                 self._gain_in_linear = _db_to_linear(self.get_gain_in_db())
                 self._gain_out_linear = _db_to_linear(self.get_gain_out_db())
@@ -65,7 +62,6 @@ class PassthroughEngine:
             stream = self.stream
             self.stream = None
             self._latest = None
-        # close outside the lock so the callback can finish cleanly
         if stream is not None:
             try:
                 stream.stop()
@@ -75,7 +71,6 @@ class PassthroughEngine:
 
     def restart(self):
         self.stop()
-        # sync gains from tkinter before restarting — safe here, called from UI thread
         try:
             self._gain_in_linear = _db_to_linear(self.get_gain_in_db())
             self._gain_out_linear = _db_to_linear(self.get_gain_out_db())
@@ -116,7 +111,6 @@ class PassthroughEngine:
                     x = np.repeat(x, 2, axis=1)
                 x = x[:, :2]
 
-                # read pre-cached floats — never call tkinter from here
                 gain_in = self._gain_in_linear
                 gain_out = self._gain_out_linear
                 pre = x * gain_in

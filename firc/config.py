@@ -18,7 +18,6 @@ def _build_yaml_config(
     gain_in_db: float = -12.0,
     gain_out_db: float = -12.0,
 ) -> str:
-    """Build CamillaDSP YAML config using yaml.dump() to safely handle escaping."""
     if not _YAML_OK:
         raise RuntimeError("PyYAML not available; cannot generate config.")
 
