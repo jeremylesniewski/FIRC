@@ -3,7 +3,7 @@ set -euo pipefail
 
 PYTHON=${PYTHON:-python3}
 VENV='.venv'
-APP_NAME="FIRC"
+APP_NAME="FIRC v0.1.5"
 SCRIPT="FIRC.py"
 ICON_ICNS=icon/FIRC.icns
 
