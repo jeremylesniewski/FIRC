@@ -15,8 +15,8 @@ def _build_yaml_config(
     play_device: str,
     left_fir: str,
     right_fir: str,
-    gain_in_db: float = 0.0,
-    gain_out_db: float = 0.0,
+    gain_in_db: float = -12.0,
+    gain_out_db: float = -12.0,
 ) -> str:
     """Build CamillaDSP YAML config using yaml.dump() to safely handle escaping."""
     if not _YAML_OK:

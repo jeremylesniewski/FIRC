@@ -58,9 +58,11 @@ class FIRFilterGUI(tk.Tk):
         self._audio_watchdog_active = False
         self._last_audio_recover = 0.0
         self._recovering_audio = False
-        self._meter_ir_cache = {"mode": None, "left": None, "right": None, "sig": None}
-        self._meter_conv_state = {"left": None, "right": None, "sig": None}
+        self._audio_stream_lock = threading.Lock()
+        self._meter_ir_cache = {"sig": None, "left": None, "right": None, "comp": 1.0}
+        self._meter_conv_state    = {"left": None, "right": None, "sig": None}
         self._analyzer_conv_state = {"left": None, "right": None, "sig": None}
+        self._compensation_enabled = tk.BooleanVar(value=True)
 
         self.log_queue = queue.Queue()
         self._log_buffer = []
@@ -202,23 +204,25 @@ class FIRFilterGUI(tk.Tk):
 
         # action
         action = ttk.Frame(frm); action.grid(row=4, column=0, sticky="ew", pady=(8,0))
-        for i in range(7): action.grid_columnconfigure(i, weight=1)
-        self.btn_toggle_io   = ttk.Button(action, text="Input Level", command=self._toggle_gain_section)
-        self.btn_toggle_io.grid(row=0, column=0, padx=(0,3), sticky="ew")
-        ttk.Button(action, text="Show Config",  command=self._toggle_config_exclusive).grid(row=0, column=1, padx=(0,3), sticky="ew")
-        ttk.Button(action, text="Write Config", command=self.write_to_config).grid(row=0, column=2, padx=(0,3), sticky="ew")
+        for i in range(6): action.grid_columnconfigure(i, weight=1)
+        ttk.Button(action, text="Show Config",  command=self._toggle_config_exclusive).grid(row=0, column=0, padx=(0,3), sticky="ew")
+        ttk.Button(action, text="Write Config", command=self.write_to_config).grid(row=0, column=1, padx=(0,3), sticky="ew")
 
         self.btn_toggle_vis  = ttk.Button(action, text="Visualizer", command=self._toggle_visualizer_exclusive)
-        self.btn_toggle_vis.grid(row=0, column=3, padx=(0,3), sticky="ew")
+        self.btn_toggle_vis.grid(row=0, column=2, padx=(0,3), sticky="ew")
         self.btn_toggle_logs = ttk.Button(action, text="Logs",       command=self._toggle_logs_exclusive)
-        self.btn_toggle_logs.grid(row=0, column=4, padx=(0,3), sticky="ew")
+        self.btn_toggle_logs.grid(row=0, column=3, padx=(0,3), sticky="ew")
+
+        # IR compensation toggle
+        ttk.Checkbutton(action, text="IR Compensation", variable=self._compensation_enabled,
+                        command=self._on_compensation_toggle).grid(row=0, column=4, padx=(3,0), sticky="w")
 
         self.launch_btn = ttk.Button(action, text="Start correction", style="Accent.TButton", command=self.toggle_launch)
-        self.launch_btn.grid(row=0, column=6, padx=(3,0), sticky="ew")
+        self.launch_btn.grid(row=0, column=5, padx=(3,0), sticky="ew")
 
         # bypass label
         self.bypass_var = tk.StringVar(value="")
-        ttk.Label(action, textvariable=self.bypass_var, font=("", 9, "italic")).grid(row=1, column=6, padx=(6,0), sticky="ne")
+        ttk.Label(action, textvariable=self.bypass_var, font=("", 9, "italic")).grid(row=1, column=5, padx=(6,0), sticky="ne")
 
         # container
         self.an_container = ttk.Frame(frm)
@@ -269,56 +273,25 @@ class FIRFilterGUI(tk.Tk):
         self.output_meter_wrap.grid_rowconfigure(0, weight=1)
         self.output_meter = Meter(self.output_meter_wrap)
         self.output_meter.grid(row=0, column=0, sticky="nsew")
+        self.post_meter = self.output_meter
 
-        # --- Input / Output setup panel ---
-        self._gain_visible = False
         self._gain_in_db  = tk.DoubleVar(value=0.0)
-        self._gain_out_db = tk.DoubleVar(value=0.0)
+        self._gain_out_db = tk.DoubleVar(value=-12.0)
 
-        self.gain_section = ttk.LabelFrame(self.an_container, text="Input / Output Setup")
-
-        gs = self.gain_section
-        gs.grid_columnconfigure(0, weight=1)
-        gs.grid_columnconfigure(1, weight=1)
-
-        def _build_strip(parent, title, meter_attr, slider_attr, label_attr, clip_attr, variable, column):
-            strip = ttk.Frame(parent)
-            strip.grid(row=0, column=column, sticky="n", padx=18, pady=(8, 6))
-            ttk.Label(strip, text=title).grid(row=0, column=0, columnspan=2, pady=(0, 6))
-            meter = VerticalMeter(strip)
-            meter.grid(row=1, column=0, rowspan=2, sticky="ns", padx=(0, 8))
-            setattr(self, meter_attr, meter)
-            slider = ttk.Scale(strip, from_=6, to=-18, orient=tk.VERTICAL, length=150,
-                               variable=variable, command=self._on_gain_change)
-            slider.grid(row=1, column=1, sticky="ns")
-            setattr(self, slider_attr, slider)
-            label = ttk.Label(strip, text="+0.0 dB", width=8, anchor="center")
-            label.grid(row=3, column=0, columnspan=2, pady=(6, 0))
-            setattr(self, label_attr, label)
-            clip_label = tk.Label(strip, text="", width=8, anchor="center", font=("TkDefaultFont", 10, "bold"), fg="#ff3b3b", bg="#1a1a1a")
-            clip_label.grid(row=4, column=0, columnspan=2, pady=(2, 0))
-            setattr(self, clip_attr, clip_label)
-
-        _build_strip(gs, "Into CamillaDSP", "pre_meter", "_gain_in_slider", "_gain_in_label", "_clip_in_label", self._gain_in_db, 0)
-        _build_strip(gs, "Out To Playback", "post_meter", "_gain_out_slider", "_gain_out_label", "_clip_out_label", self._gain_out_db, 1)
-
-        ttk.Label(gs, text="Peak dBFS into convolution and out to playback. Click a meter to reset peak.",
-                  font=("", 9, "italic"), foreground="#a0a2a5").grid(
-            row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(0,8))
+        self._gain_out_label = None
+        self._clip_out_label = None
+        self._gain_out_slider = None
 
         # start compact
         self.an_frame.grid_remove()
         self.log_frame.grid_remove()
         self.cfg_frame.grid_remove()
-        self.gain_section.grid_remove()
-        self._on_gain_change()
 
     # exclusive view
     def _apply_window_mode(self, mode: str):
         self.an_frame.grid_remove(); self._an_visible = False
         self.log_frame.grid_remove(); self._logs_visible = False
         self.cfg_frame.grid_remove(); self._cfg_visible = False
-        self.gain_section.grid_remove(); self._gain_visible = False
 
         if mode == "an":
             self.an_frame.grid(row=0, column=0, sticky="nsew", padx=0, pady=(6,0)); self._an_visible = True
@@ -330,8 +303,6 @@ class FIRFilterGUI(tk.Tk):
         elif mode == "cfg":
             self._load_config_into_view()
             self.cfg_frame.grid(row=0, column=0, sticky="nsew", padx=0, pady=(6,0)); self._cfg_visible = True
-        elif mode == "io":
-            self.gain_section.grid(row=0, column=0, sticky="ew", padx=0, pady=(6,0)); self._gain_visible = True
 
         self.update_idletasks()
         if mode == "none" and hasattr(self, "_base_w") and hasattr(self, "_base_h"):
@@ -362,24 +333,19 @@ class FIRFilterGUI(tk.Tk):
 
     # meter loop
     def _update_bottom_meter(self):
-        pre_db = None
         post_db = None
 
         try:
             x = self._get_monitor_audio_chunk()
             if x is not None:
-                pre_db, post_db = self._measure_live_levels(x)
+                _, post_db = self._measure_live_levels(x)
         except Exception:
             pass
 
-        self.pre_meter.draw_meter(pre_db, pre_db)
         self.post_meter.draw_meter(post_db, post_db)
         self.output_meter.draw_meter(post_db, post_db)
 
-        # Update clipping indicators
-        if hasattr(self, "_clip_in_label"):
-            self._clip_in_label.config(text="CLIP!" if pre_db is not None and pre_db >= -1.0 else "")
-        if hasattr(self, "_clip_out_label"):
+        if self._clip_out_label is not None:
             self._clip_out_label.config(text="CLIP!" if post_db is not None and post_db >= -1.0 else "")
 
         self.after(33, self._update_bottom_meter)
@@ -411,14 +377,23 @@ class FIRFilterGUI(tk.Tk):
         if ir_right is None or len(ir_right) == 0:
             ir_right = np.array([1.0], dtype=np.float64)
 
+        ir_left  = np.asarray(ir_left,  dtype=np.float64)
+        ir_right = np.asarray(ir_right, dtype=np.float64)
+
+        gain_L = float(np.sqrt(np.sum(ir_left  ** 2))) or 1.0
+        gain_R = float(np.sqrt(np.sum(ir_right ** 2))) or 1.0
+        avg_gain = (gain_L + gain_R) / 2.0
+        comp = max(0.1, min(10.0, 1.0 / avg_gain)) if avg_gain > 1e-6 else 1.0
+
         self._meter_ir_cache = {
-            "mode": self.proc_mode,
-            "left": np.asarray(ir_left, dtype=np.float64),
-            "right": np.asarray(ir_right, dtype=np.float64),
-            "sig": sig,
+            "sig":   sig,
+            "left":  ir_left,
+            "right": ir_right,
+            "comp":  comp,
         }
-        self._meter_conv_state = {"left": None, "right": None, "sig": None}
-        return self._meter_ir_cache["left"], self._meter_ir_cache["right"]
+        self._meter_conv_state    = {"left": None, "right": None, "sig": None}
+        self._analyzer_conv_state = {"left": None, "right": None, "sig": None}
+        return ir_left, ir_right
 
     def _process_signal_block(self, x, conv_state):
         arr = np.asarray(x, dtype=np.float64)
@@ -427,39 +402,40 @@ class FIRFilterGUI(tk.Tk):
         if arr.shape[1] == 1:
             arr = np.repeat(arr, 2, axis=1)
 
-        gain_in = _db_to_linear(self._gain_in_db.get())
-        gain_out = _db_to_linear(self._gain_out_db.get())
-
-        pre = arr[:, :2] * gain_in
+        pre = arr[:, :2]
 
         ir_left, ir_right = self._get_active_irs()
         sig = (len(ir_left), len(ir_right))
         if conv_state.get("sig") != sig:
-            conv_state["left"] = np.zeros(max(len(ir_left) - 1, 0), dtype=np.float64)
+            conv_state["left"]  = np.zeros(max(len(ir_left)  - 1, 0), dtype=np.float64)
             conv_state["right"] = np.zeros(max(len(ir_right) - 1, 0), dtype=np.float64)
-            conv_state["sig"] = sig
+            conv_state["sig"]   = sig
 
-        left_in = pre[:, 0]
+        left_in  = pre[:, 0]
         right_in = pre[:, 1]
+
         if len(ir_left) > 1:
-            left_out, conv_state["left"] = scipy.signal.lfilter(
-                ir_left, [1.0], left_in, zi=conv_state["left"]
-            )
+            left_out,  conv_state["left"]  = scipy.signal.lfilter(ir_left,  [1.0], left_in,  zi=conv_state["left"])
         else:
-            left_out = left_in * float(ir_left[0])
+            left_out  = left_in  * float(ir_left[0])
+
         if len(ir_right) > 1:
-            right_out, conv_state["right"] = scipy.signal.lfilter(
-                ir_right, [1.0], right_in, zi=conv_state["right"]
-            )
+            right_out, conv_state["right"] = scipy.signal.lfilter(ir_right, [1.0], right_in, zi=conv_state["right"])
         else:
             right_out = right_in * float(ir_right[0])
 
+        if self._compensation_enabled.get():
+            comp = self._meter_ir_cache.get("comp", 1.0) or 1.0
+            left_out  = left_out  * comp
+            right_out = right_out * comp
+
+        gain_out = _db_to_linear(self._gain_out_db.get())
         post = np.column_stack((left_out, right_out)) * gain_out
         return pre, post
 
     def _measure_live_levels(self, x):
         pre, post = self._process_signal_block(x, self._meter_conv_state)
-        pre_peak = float(np.max(np.abs(pre))) if pre.size else 0.0
+        pre_peak  = float(np.max(np.abs(pre)))  if pre.size  else 0.0
         post_peak = float(np.max(np.abs(post))) if post.size else 0.0
 
         def _peak_to_db(peak):
@@ -554,14 +530,12 @@ class FIRFilterGUI(tk.Tk):
             if show_message:
                 self._show_dialog("error", "Missing Devices", "Please select capture and playback devices.")
             return False
-        gi = 0.0; go = 0.0
-        try: gi = float(self._gain_in_db.get())
-        except Exception: pass
+        go = 0.0
         try: go = float(self._gain_out_db.get())
         except Exception: pass
 
         try:
-            yaml_text = _build_yaml_config(sr, cap, play, left, right, gi, go)
+            yaml_text = _build_yaml_config(sr, cap, play, left, right, go)
             CONFIG_INTERNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(CONFIG_INTERNAL_PATH, "w", encoding="utf-8") as f:
                 f.write(yaml_text)
@@ -634,46 +608,48 @@ class FIRFilterGUI(tk.Tk):
         """Direct capture→playback (no CamillaDSP). Default whenever not in correction."""
         if self.proc_mode == "correction":
             return False
-        self._stop_if_running()
-        self._stop_meter_tap()
-        cap, play = self._resolve_selected_devices()
-        if not cap or not play:
-            self.bypass_var.set("Select capture + playback")
-            if log:
-                self.append_log("[Passthrough] waiting for devices\n")
-            self._sync_launch_btn()
-            return False
-        try:
-            if getattr(self, "passthrough", None) is None:
+
+        with self._audio_stream_lock:
+            self._stop_if_running()
+            self._stop_meter_tap()
+            cap, play = self._resolve_selected_devices()
+            if not cap or not play:
+                self.bypass_var.set("Select capture + playback")
                 if log:
-                    self.append_log("[Passthrough] engine not initialized\n")
+                    self.append_log("[Passthrough] waiting for devices\n")
+                self._sync_launch_btn()
                 return False
+            try:
+                if getattr(self, "passthrough", None) is None:
+                    if log:
+                        self.append_log("[Passthrough] engine not initialized\n")
+                    return False
 
-            ok = False
-            if self.passthrough.is_active():
-                ok = True
-            elif self.passthrough.running:
-                ok = self.passthrough.restart()
-            else:
-                ok = self.passthrough.start()
+                ok = False
+                if self.passthrough.is_active():
+                    ok = True
+                elif self.passthrough.running:
+                    ok = self.passthrough.restart()
+                else:
+                    ok = self.passthrough.start()
 
-            if ok:
-                self.proc_mode = None
-                self.bypass_var.set("Direct passthrough")
+                if ok:
+                    self.proc_mode = None
+                    self.bypass_var.set("Direct passthrough")
+                    if log:
+                        self.append_log("[Passthrough] capture → playback active\n")
+                else:
+                    self.bypass_var.set("Passthrough failed")
+                    if log:
+                        self.append_log("[Passthrough] could not open audio stream\n")
+            except Exception as e:
+                self.bypass_var.set(f"Passthrough error: {e}")
                 if log:
-                    self.append_log("[Passthrough] capture → playback active\n")
-            else:
-                self.bypass_var.set("Passthrough failed")
-                if log:
-                    self.append_log("[Passthrough] could not open audio stream\n")
-        except Exception as e:
-            self.bypass_var.set(f"Passthrough error: {e}")
-            if log:
-                self.append_log(f"[Passthrough] error: {e}\n")
-            ok = False
-        finally:
-            self._sync_launch_btn()
-        return ok
+                    self.append_log(f"[Passthrough] error: {e}\n")
+                ok = False
+            finally:
+                self._sync_launch_btn()
+            return ok
 
     def _schedule_audio_watchdog(self):
         if self._audio_watchdog_active:
@@ -694,7 +670,6 @@ class FIRFilterGUI(tk.Tk):
 
     def _maintain_audio_path(self):
         now = time.monotonic()
-        # CHANGE 1: also bail if camilla is mid-start
         if self._recovering_audio or self._camilla_starting or (now - self._last_audio_recover) < 3.0:
             return
 
@@ -734,7 +709,8 @@ class FIRFilterGUI(tk.Tk):
 
     def _restart_audio_after_device_change(self, force_correction=False):
         if force_correction or self.proc_mode == "correction":
-            self._stop_if_running()
+            with self._audio_stream_lock:
+                self._stop_if_running()
             if self.write_to_config(show_message=False):
                 self._stop_passthrough()
                 self._start_camilla(CONFIG_INTERNAL_PATH, "correction", show_errors=False)
@@ -884,10 +860,8 @@ class FIRFilterGUI(tk.Tk):
                     self.fir_left_var.set(str(fir_L))
                 if fir_R:
                     self.fir_right_var.set(str(fir_R))
-                gain_in = filters.get("gain_in", {}).get("parameters", {}).get("gain")
+                # Note: gain_in is no longer used (always 0dB). Only restore gain_out.
                 gain_out = filters.get("gain_out", {}).get("parameters", {}).get("gain")
-                if gain_in is not None:
-                    self._gain_in_db.set(float(gain_in))
                 if gain_out is not None:
                     self._gain_out_db.set(float(gain_out))
                 self._on_gain_change()
@@ -1096,62 +1070,70 @@ class FIRFilterGUI(tk.Tk):
         self.after(0, lambda: self._finish_start_camilla(cam_bin, config_path, mode, show_errors, rc, out, err))
 
     def _finish_start_camilla(self, cam_bin, config_path, mode, show_errors, rc, out, err):
-        self._camilla_starting = False
         if rc != 0:
+            self._camilla_starting = False
             msg = (out or err or "Unknown config validation error").strip()
             self.append_log(f"[CamillaDSP config check failed]\n{msg}\n")
             if show_errors:
                 self._show_dialog("error", "Config check failed", msg, camilla_log=True)
             return False
 
-        self._stop_if_running()
-        cmd = [cam_bin, str(config_path), "-v"]
-        self._proc_generation += 1
-        generation = self._proc_generation
-        try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-        except Exception as e:
-            if show_errors:
-                self._show_dialog("error", "Start failed", str(e))
-            else:
-                self.append_log(f"{mode.capitalize()} start error: {e}\n")
-            self.proc = None
-            self.proc_mode = None
-            self._sync_launch_btn()
-            return False
-
-        def verify_start():
-            if proc.poll() is not None:
-                try:
-                    output, _ = proc.communicate(timeout=1)
-                except Exception:
-                    output = ""
-                msg = output.strip() or f"CamillaDSP exited immediately with code {proc.returncode}."
-                self.append_log(f"[CamillaDSP failed to start: {mode}]\n{msg}\n")
+        with self._audio_stream_lock:
+            self._stop_if_running()
+            cmd = [cam_bin, str(config_path), "-v"]
+            self._proc_generation += 1
+            generation = self._proc_generation
+            try:
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            except Exception as e:
+                self._camilla_starting = False
                 if show_errors:
-                    self._show_dialog("error", "Start failed", msg, camilla_log=True)
+                    self._show_dialog("error", "Start failed", str(e))
+                else:
+                    self.append_log(f"{mode.capitalize()} start error: {e}\n")
                 self.proc = None
                 self.proc_mode = None
                 self._sync_launch_btn()
-                self._ensure_passthrough_audio()
-                return
+                return False
 
-            self.proc = proc
-            self.proc_mode = "correction"
-            self.proc_start_time = time.time()
-            self._sync_launch_btn()
-            self.bypass_var.set("CamillaDSP correction")
-            self.append_log("Started CamillaDSP (correction)\n")
-            self._start_meter_tap()
-            self.proc_thread = threading.Thread(
-                target=self._reader_thread,
-                args=(proc, generation),
-                daemon=True,
-                name=f"CamillaReader-{mode}",
-            )
-            self.proc_thread.start()
-            self._schedule_log_poll()
-            self._schedule_process_monitor()
+        def verify_start():
+            with self._audio_stream_lock:
+                if generation != self._proc_generation:
+                    return
+
+                if proc.poll() is not None:
+                    try:
+                        output, _ = proc.communicate(timeout=1)
+                    except Exception:
+                        output = ""
+                    msg = output.strip() or f"CamillaDSP exited immediately with code {proc.returncode}."
+                    self.append_log(f"[CamillaDSP failed to start: {mode}]\n{msg}\n")
+                    if show_errors:
+                        self._show_dialog("error", "Start failed", msg, camilla_log=True)
+                    self.proc = None
+                    self.proc_mode = None
+                    self._sync_launch_btn()
+                    self._ensure_passthrough_audio()
+                    self._camilla_starting = False
+                    return
+
+                self.proc = proc
+                self.proc_mode = "correction"
+                self.proc_start_time = time.time()
+                self._sync_launch_btn()
+                self.bypass_var.set("CamillaDSP correction")
+                self.append_log("Started CamillaDSP (correction)\n")
+                self._start_meter_tap()
+                self.proc_thread = threading.Thread(
+                    target=self._reader_thread,
+                    args=(proc, generation),
+                    daemon=True,
+                    name=f"CamillaReader-{mode}",
+                )
+                self.proc_thread.start()
+                self._schedule_log_poll()
+                self._schedule_process_monitor()
+                self._camilla_starting = False
 
         self.after(350, verify_start)
         return True
@@ -1177,9 +1159,10 @@ class FIRFilterGUI(tk.Tk):
         else:
             if self._camilla_starting:
                 return
-            self._stop_if_running()
-            self.proc_mode = None
-            self._sync_launch_btn()
+            with self._audio_stream_lock:
+                self._stop_if_running()
+                self.proc_mode = None
+                self._sync_launch_btn()
             try:
                 self.analyzer.clear_reference_curve()
             except Exception:
@@ -1224,11 +1207,12 @@ class FIRFilterGUI(tk.Tk):
 
         rc = self.proc.poll()
         if rc is not None:
-            self.append_log(f"[CamillaDSP exited with code {rc}] — recovering passthrough…\n")
-            self.proc = None
-            self.proc_mode = None
-            self._sync_launch_btn()
-            self._stop_meter_tap()
+            with self._audio_stream_lock:
+                self.append_log(f"[CamillaDSP exited with code {rc}] — recovering passthrough…\n")
+                self.proc = None
+                self.proc_mode = None
+                self._sync_launch_btn()
+                self._stop_meter_tap()
             self._ensure_passthrough_audio()
             return
 
@@ -1271,12 +1255,6 @@ class FIRFilterGUI(tk.Tk):
             self._schedule_log_poll()
 
     # misc
-    def _toggle_gain_section(self):
-        if self._gain_visible:
-            self._apply_window_mode("none")
-        else:
-            self._apply_window_mode("io")
-
     def _apply_gain_update(self):
         self._pending_gain_job = None
         try:
@@ -1285,7 +1263,6 @@ class FIRFilterGUI(tk.Tk):
             self._meter_conv_state = {"left": None, "right": None, "sig": None}
             self._analyzer_conv_state = {"left": None, "right": None, "sig": None}
             if self.proc_mode == "correction":
-                # CHANGE 2: guard against restarting while already starting
                 if config_ok and not self._camilla_starting:
                     self._stop_if_running()
                     self._stop_passthrough()
@@ -1297,15 +1274,12 @@ class FIRFilterGUI(tk.Tk):
 
     def _on_gain_change(self, _=None):
         try:
-            gi = self._gain_in_db.get()
             go = self._gain_out_db.get()
-            if hasattr(self, "_gain_in_label"):
-                self._gain_in_label.config(text=f"{gi:+.1f} dB")
-            if hasattr(self, "_gain_out_label"):
-                self._gain_out_label.config(text=f"{go:+.1f} dB")
-            # CHANGE 3: push gains to passthrough as plain floats — never call tkinter from audio thread
+            # FIX: use None check instead of hasattr, since the stub sets these to None
+            if self._gain_out_label is not None:
+                self._gain_out_label.config(text=f"{go:.1f} dB")
             if getattr(self, "passthrough", None):
-                self.passthrough.update_gains(gi, go)
+                self.passthrough.update_gains(0.0, go)  # Input always 0dB, only output gain
         except Exception:
             pass
         if not self._ready_for_gain_updates:
@@ -1313,6 +1287,16 @@ class FIRFilterGUI(tk.Tk):
         if self._pending_gain_job is not None:
             self.after_cancel(self._pending_gain_job)
         self._pending_gain_job = self.after(500, self._apply_gain_update)
+
+    def _on_compensation_toggle(self):
+        """Handle convolution compensation toggle change."""
+        try:
+            if self._compensation_enabled.get():
+                self.append_log("[Compensation] Auto-compensation enabled\n")
+            else:
+                self.append_log("[Compensation] Auto-compensation disabled\n")
+        except Exception as e:
+            self.append_log(f"[Compensation error] {e}\n")
 
     def on_sr_change(self):
         new_rate = self.sr_var.get()

@@ -47,20 +47,21 @@ class PassthroughEngine:
         return time.monotonic() - self._last_ok
 
     def start(self):
-        if not _AUDIO_OK or self.running:
-            return False
-        # sync gains from tkinter before starting — safe here, called from UI thread
-        try:
-            self._gain_in_linear = _db_to_linear(self.get_gain_in_db())
-            self._gain_out_linear = _db_to_linear(self.get_gain_out_db())
-        except Exception:
-            pass
-        self.running = True
-        return self._open_stream()
+        with self.lock:
+            if not _AUDIO_OK or self.running:
+                return False
+            # sync gains from tkinter before starting — safe here, called from UI thread
+            try:
+                self._gain_in_linear = _db_to_linear(self.get_gain_in_db())
+                self._gain_out_linear = _db_to_linear(self.get_gain_out_db())
+            except Exception:
+                pass
+            self.running = True
+            return self._open_stream()
 
     def stop(self):
-        self.running = False
         with self.lock:
+            self.running = False
             stream = self.stream
             self.stream = None
             self._latest = None
@@ -80,8 +81,9 @@ class PassthroughEngine:
             self._gain_out_linear = _db_to_linear(self.get_gain_out_db())
         except Exception:
             pass
-        self.running = True
-        return self._open_stream()
+        with self.lock:
+            self.running = True
+            return self._open_stream()
 
     def _open_stream(self):
         try:
