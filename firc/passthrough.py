@@ -1,31 +1,20 @@
 import threading
 import time
 
-from .audio_utils import _db_to_linear
 from .deps import _AUDIO_OK, np, sd
 from .platform_utils import _sd_find_device_index
 
 
 class PassthroughEngine:
-
-
-    def __init__(self, get_capture_name, get_playback_name, get_samplerate, get_gain_in_db, get_gain_out_db):
+    def __init__(self, get_capture_name, get_playback_name, get_samplerate):
         self.get_capture_name = get_capture_name
         self.get_playback_name = get_playback_name
         self.get_samplerate = get_samplerate
-        self.get_gain_in_db = get_gain_in_db
-        self.get_gain_out_db = get_gain_out_db
         self.stream = None
         self.running = False
         self.lock = threading.Lock()
         self._latest = None
         self._last_ok = 0.0
-        self._gain_in_linear = 1.0
-        self._gain_out_linear = 1.0
-
-    def update_gains(self, gain_in_db, gain_out_db):
-        self._gain_in_linear = _db_to_linear(gain_in_db)
-        self._gain_out_linear = _db_to_linear(gain_out_db)
 
     def get_latest(self):
         with self.lock:
@@ -48,11 +37,6 @@ class PassthroughEngine:
         with self.lock:
             if not _AUDIO_OK or self.running:
                 return False
-            try:
-                self._gain_in_linear = _db_to_linear(self.get_gain_in_db())
-                self._gain_out_linear = _db_to_linear(self.get_gain_out_db())
-            except Exception:
-                pass
             self.running = True
             return self._open_stream()
 
@@ -71,11 +55,6 @@ class PassthroughEngine:
 
     def restart(self):
         self.stop()
-        try:
-            self._gain_in_linear = _db_to_linear(self.get_gain_in_db())
-            self._gain_out_linear = _db_to_linear(self.get_gain_out_db())
-        except Exception:
-            pass
         with self.lock:
             self.running = True
             return self._open_stream()
@@ -111,10 +90,8 @@ class PassthroughEngine:
                     x = np.repeat(x, 2, axis=1)
                 x = x[:, :2]
 
-                gain_in = self._gain_in_linear
-                gain_out = self._gain_out_linear
-                pre = x * gain_in
-                post = pre * gain_out
+                pre = x
+                post = x
 
                 with self.lock:
                     self._latest = pre.copy()

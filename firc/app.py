@@ -10,7 +10,7 @@ import scipy.signal
 
 from . import __version__
 from .analyzer import Analyzer
-from .audio_utils import _db_to_linear, _read_wav_float
+from .audio_utils import _db_to_linear, _peak_dbfs, _read_wav_float, _rms_dbfs
 from .config import _build_yaml_config, _read_yaml_config
 from .deps import _AUDIO_OK, _PLOT_OK, np
 from .level_tap import LevelTap
@@ -31,6 +31,10 @@ from .runtime import (
     IMPULSE_R_PATH,
     ensure_runtime_files,
 )
+
+
+MIN_APP_WIDTH = 860
+CORRECTION_HEADROOM_DB = -6.0
 
 
 # GUI
@@ -59,10 +63,11 @@ class FIRFilterGUI(tk.Tk):
         self._last_audio_recover = 0.0
         self._recovering_audio = False
         self._audio_stream_lock = threading.Lock()
-        self._meter_ir_cache = {"sig": None, "left": None, "right": None, "comp": 1.0}
+        self._meter_ir_cache = {"sig": None, "left": None, "right": None}
         self._meter_conv_state    = {"left": None, "right": None, "sig": None}
         self._analyzer_conv_state = {"left": None, "right": None, "sig": None}
-        self._compensation_enabled = tk.BooleanVar(value=True)
+        self._meter_level_blocks = []
+        self._meter_level_samples = 0
 
         self.log_queue = queue.Queue()
         self._log_buffer = []
@@ -70,6 +75,10 @@ class FIRFilterGUI(tk.Tk):
         ensure_runtime_files()
         self._init_styles()
         self.create_widgets()
+        self.update_idletasks()
+        self._fixed_w = max(MIN_APP_WIDTH, self.winfo_reqwidth())
+        self._base_h = self.winfo_reqheight()
+        self.minsize(self._fixed_w, self._base_h)
 
         # meter loop
         self.after(50, self._update_bottom_meter)
@@ -204,7 +213,7 @@ class FIRFilterGUI(tk.Tk):
 
         # action
         action = ttk.Frame(frm); action.grid(row=4, column=0, sticky="ew", pady=(8,0))
-        for i in range(6): action.grid_columnconfigure(i, weight=1)
+        for i in range(5): action.grid_columnconfigure(i, weight=1)
         ttk.Button(action, text="Show Config",  command=self._toggle_config_exclusive).grid(row=0, column=0, padx=(0,3), sticky="ew")
         ttk.Button(action, text="Write Config", command=self.write_to_config).grid(row=0, column=1, padx=(0,3), sticky="ew")
 
@@ -213,16 +222,12 @@ class FIRFilterGUI(tk.Tk):
         self.btn_toggle_logs = ttk.Button(action, text="Logs",       command=self._toggle_logs_exclusive)
         self.btn_toggle_logs.grid(row=0, column=3, padx=(0,3), sticky="ew")
 
-        # IR compensation toggle
-        ttk.Checkbutton(action, text="IR Compensation", variable=self._compensation_enabled,
-                        command=self._on_compensation_toggle).grid(row=0, column=4, padx=(3,0), sticky="w")
-
         self.launch_btn = ttk.Button(action, text="Start correction", style="Accent.TButton", command=self.toggle_launch)
-        self.launch_btn.grid(row=0, column=5, padx=(3,0), sticky="ew")
+        self.launch_btn.grid(row=0, column=4, padx=(3,0), sticky="ew")
 
         # bypass label
         self.bypass_var = tk.StringVar(value="")
-        ttk.Label(action, textvariable=self.bypass_var, font=("", 9, "italic")).grid(row=1, column=5, padx=(6,0), sticky="ne")
+        ttk.Label(action, textvariable=self.bypass_var, font=("", 9, "italic")).grid(row=1, column=4, padx=(6,0), sticky="ne")
 
         # container
         self.an_container = ttk.Frame(frm)
@@ -276,7 +281,7 @@ class FIRFilterGUI(tk.Tk):
         self.post_meter = self.output_meter
 
         self._gain_in_db  = tk.DoubleVar(value=0.0)
-        self._gain_out_db = tk.DoubleVar(value=-12.0)
+        self._gain_out_db = tk.DoubleVar(value=CORRECTION_HEADROOM_DB)
 
         self._gain_out_label = None
         self._clip_out_label = None
@@ -305,8 +310,10 @@ class FIRFilterGUI(tk.Tk):
             self.cfg_frame.grid(row=0, column=0, sticky="nsew", padx=0, pady=(6,0)); self._cfg_visible = True
 
         self.update_idletasks()
-        if mode == "none" and hasattr(self, "_base_w") and hasattr(self, "_base_h"):
-            self.geometry(f"{self._base_w}x{self._base_h}")
+        if hasattr(self, "_fixed_w"):
+            w = max(self._fixed_w, self.winfo_reqwidth()) if mode == "an" else self._fixed_w
+            h = self._base_h if mode == "none" and hasattr(self, "_base_h") else self.winfo_reqheight()
+            self.geometry(f"{w}x{h}")
         else:
             w = self.winfo_reqwidth()
             h = self.winfo_reqheight()
@@ -333,20 +340,21 @@ class FIRFilterGUI(tk.Tk):
 
     # meter loop
     def _update_bottom_meter(self):
-        post_db = None
+        post_rms_db = None
+        post_peak_db = None
 
         try:
             x = self._get_monitor_audio_chunk()
             if x is not None:
-                _, post_db = self._measure_live_levels(x)
+                _, post_rms_db, _, post_peak_db = self._measure_live_levels(x)
         except Exception:
             pass
 
-        self.post_meter.draw_meter(post_db, post_db)
-        self.output_meter.draw_meter(post_db, post_db)
+        self.post_meter.draw_meter(post_rms_db, post_peak_db)
+        self.output_meter.draw_meter(post_rms_db, post_peak_db)
 
         if self._clip_out_label is not None:
-            self._clip_out_label.config(text="CLIP!" if post_db is not None and post_db >= -1.0 else "")
+            self._clip_out_label.config(text="CLIP!" if post_peak_db is not None and post_peak_db >= -1.0 else "")
 
         self.after(33, self._update_bottom_meter)
 
@@ -358,6 +366,10 @@ class FIRFilterGUI(tk.Tk):
         if getattr(self, "passthrough", None):
             return self.passthrough.get_latest()
         return None
+
+    def _reset_meter_level_state(self):
+        self._meter_level_blocks = []
+        self._meter_level_samples = 0
 
     def _active_meter_paths(self):
         if self.proc_mode == "correction":
@@ -380,19 +392,14 @@ class FIRFilterGUI(tk.Tk):
         ir_left  = np.asarray(ir_left,  dtype=np.float64)
         ir_right = np.asarray(ir_right, dtype=np.float64)
 
-        gain_L = float(np.sqrt(np.sum(ir_left  ** 2))) or 1.0
-        gain_R = float(np.sqrt(np.sum(ir_right ** 2))) or 1.0
-        avg_gain = (gain_L + gain_R) / 2.0
-        comp = max(0.1, min(10.0, 1.0 / avg_gain)) if avg_gain > 1e-6 else 1.0
-
         self._meter_ir_cache = {
             "sig":   sig,
             "left":  ir_left,
             "right": ir_right,
-            "comp":  comp,
         }
         self._meter_conv_state    = {"left": None, "right": None, "sig": None}
         self._analyzer_conv_state = {"left": None, "right": None, "sig": None}
+        self._reset_meter_level_state()
         return ir_left, ir_right
 
     def _process_signal_block(self, x, conv_state):
@@ -424,26 +431,24 @@ class FIRFilterGUI(tk.Tk):
         else:
             right_out = right_in * float(ir_right[0])
 
-        if self._compensation_enabled.get():
-            comp = self._meter_ir_cache.get("comp", 1.0) or 1.0
-            left_out  = left_out  * comp
-            right_out = right_out * comp
-
         gain_out = _db_to_linear(self._gain_out_db.get())
         post = np.column_stack((left_out, right_out)) * gain_out
         return pre, post
 
     def _measure_live_levels(self, x):
         pre, post = self._process_signal_block(x, self._meter_conv_state)
-        pre_peak  = float(np.max(np.abs(pre)))  if pre.size  else 0.0
-        post_peak = float(np.max(np.abs(post))) if post.size else 0.0
-
-        def _peak_to_db(peak):
-            if peak <= 0.0:
-                return None
-            return max(-60.0, min(0.0, 20.0 * np.log10(max(peak, 1e-12))))
-
-        return _peak_to_db(pre_peak), _peak_to_db(post_peak)
+        self._meter_level_blocks.append(post.copy())
+        self._meter_level_samples += post.shape[0]
+        try:
+            sr = int(self.sr_var.get() or 48000)
+        except Exception:
+            sr = 48000
+        max_samples = max(1, int(sr * 0.3))
+        while self._meter_level_samples > max_samples and len(self._meter_level_blocks) > 1:
+            old = self._meter_level_blocks.pop(0)
+            self._meter_level_samples -= old.shape[0]
+        post_window = np.vstack(self._meter_level_blocks) if self._meter_level_blocks else post
+        return _rms_dbfs(pre), _rms_dbfs(post_window), _peak_dbfs(pre), _peak_dbfs(post)
 
     def _analyzer_monitor_chunk(self, x):
         _pre, post = self._process_signal_block(x, self._analyzer_conv_state)
@@ -530,12 +535,12 @@ class FIRFilterGUI(tk.Tk):
             if show_message:
                 self._show_dialog("error", "Missing Devices", "Please select capture and playback devices.")
             return False
-        go = 0.0
+        go = CORRECTION_HEADROOM_DB
         try: go = float(self._gain_out_db.get())
         except Exception: pass
 
         try:
-            yaml_text = _build_yaml_config(sr, cap, play, left, right, go)
+            yaml_text = _build_yaml_config(sr, cap, play, left, right, 0.0, go)
             CONFIG_INTERNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(CONFIG_INTERNAL_PATH, "w", encoding="utf-8") as f:
                 f.write(yaml_text)
@@ -557,8 +562,9 @@ class FIRFilterGUI(tk.Tk):
             self.append_log("Ready.\n")
             self._ready_for_gain_updates = True
             self.update_idletasks()
-            self._base_w = self.winfo_width()
+            self._fixed_w = max(MIN_APP_WIDTH, self._fixed_w, self.winfo_width())
             self._base_h = self.winfo_height()
+            self.minsize(self._fixed_w, self._base_h)
             self._apply_window_mode("none")
         except Exception as e:
             self.append_log(f"[Startup error] {e}\n")
@@ -570,8 +576,6 @@ class FIRFilterGUI(tk.Tk):
                 get_capture_name=lambda: self.cap_var.get(),
                 get_playback_name=lambda: self.play_var.get(),
                 get_samplerate=lambda: self.sr_var.get(),
-                get_gain_in_db=lambda: self._gain_in_db.get(),
-                get_gain_out_db=lambda: self._gain_out_db.get(),
             )
         except Exception as e:
             self.append_log(f"[PassthroughEngine] init failed: {e}\n")
@@ -592,10 +596,12 @@ class FIRFilterGUI(tk.Tk):
             self.passthrough.stop()
 
     def _stop_meter_tap(self):
+        self._reset_meter_level_state()
         if getattr(self, "level_tap", None):
             self.level_tap.stop()
 
     def _start_meter_tap(self):
+        self._reset_meter_level_state()
         if getattr(self, "level_tap", None) is None:
             return
         try:
@@ -610,6 +616,7 @@ class FIRFilterGUI(tk.Tk):
             return False
 
         with self._audio_stream_lock:
+            self._reset_meter_level_state()
             self._stop_if_running()
             self._stop_meter_tap()
             cap, play = self._resolve_selected_devices()
@@ -860,10 +867,6 @@ class FIRFilterGUI(tk.Tk):
                     self.fir_left_var.set(str(fir_L))
                 if fir_R:
                     self.fir_right_var.set(str(fir_R))
-                # Note: gain_in is no longer used (always 0dB). Only restore gain_out.
-                gain_out = filters.get("gain_out", {}).get("parameters", {}).get("gain")
-                if gain_out is not None:
-                    self._gain_out_db.set(float(gain_out))
                 self._on_gain_change()
             except Exception:
                 pass
@@ -1262,6 +1265,7 @@ class FIRFilterGUI(tk.Tk):
             self._meter_ir_cache["sig"] = None
             self._meter_conv_state = {"left": None, "right": None, "sig": None}
             self._analyzer_conv_state = {"left": None, "right": None, "sig": None}
+            self._reset_meter_level_state()
             if self.proc_mode == "correction":
                 if config_ok and not self._camilla_starting:
                     self._stop_if_running()
@@ -1275,11 +1279,8 @@ class FIRFilterGUI(tk.Tk):
     def _on_gain_change(self, _=None):
         try:
             go = self._gain_out_db.get()
-            # FIX: use None check instead of hasattr, since the stub sets these to None
             if self._gain_out_label is not None:
                 self._gain_out_label.config(text=f"{go:.1f} dB")
-            if getattr(self, "passthrough", None):
-                self.passthrough.update_gains(0.0, go)  # Input always 0dB, only output gain
         except Exception:
             pass
         if not self._ready_for_gain_updates:
@@ -1287,16 +1288,6 @@ class FIRFilterGUI(tk.Tk):
         if self._pending_gain_job is not None:
             self.after_cancel(self._pending_gain_job)
         self._pending_gain_job = self.after(500, self._apply_gain_update)
-
-    def _on_compensation_toggle(self):
-        """Handle convolution compensation toggle change."""
-        try:
-            if self._compensation_enabled.get():
-                self.append_log("[Compensation] Auto-compensation enabled\n")
-            else:
-                self.append_log("[Compensation] Auto-compensation disabled\n")
-        except Exception as e:
-            self.append_log(f"[Compensation error] {e}\n")
 
     def on_sr_change(self):
         new_rate = self.sr_var.get()

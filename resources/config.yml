@@ -42,7 +42,7 @@ filters:
   gain_out:
     type: Gain
     parameters:
-      gain: 0.00
+      gain: -6.00
       scale: dB
       inverted: false
   fir_L:

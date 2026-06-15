@@ -351,14 +351,13 @@ class Analyzer(ttk.LabelFrame):
         X = np.fft.rfft(xw)
         freqs = np.fft.rfftfreq(N, 1.0 / sr)
 
-        #TRUE amplitude correction for Hann window
         window_gain = np.sum(w) / N
 
         mag = np.abs(X) / (N * window_gain / 2.0)
 
-        mag = np.maximum(mag, 1e-12)
+        mag = np.maximum(mag / math.sqrt(2.0), 1e-12)
 
-        db = 20.0 * np.log10(mag / 1.0)  # 1.0 = full scale reference
+        db = 20.0 * np.log10(mag)
 
         if np.max(np.abs(x)) < 1e-5:
             db[:] = self.y_min_db
@@ -602,4 +601,3 @@ class Analyzer(ttk.LabelFrame):
             self.canvas.draw_idle()
         except Exception:
             pass
-

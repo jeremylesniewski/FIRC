@@ -15,8 +15,8 @@ def _build_yaml_config(
     play_device: str,
     left_fir: str,
     right_fir: str,
-    gain_in_db: float = -12.0,
-    gain_out_db: float = -12.0,
+    gain_in_db: float = 0.0,
+    gain_out_db: float = -6.0,
 ) -> str:
     if not _YAML_OK:
         raise RuntimeError("PyYAML not available; cannot generate config.")

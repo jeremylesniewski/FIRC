@@ -2,7 +2,7 @@ import struct
 import wave
 from pathlib import Path
 
-from .deps import np
+import numpy as np
 
 
 def _ensure_impulse_wav(path: Path, samplerate: int, n_samples: int = 2048):
@@ -21,6 +21,34 @@ def _db_to_linear(db_value):
         return float(10.0 ** (float(db_value) / 20.0))
     except Exception:
         return 1.0
+
+
+def _linear_to_dbfs(value):
+    try:
+        value = float(value)
+    except Exception:
+        return None
+    if value <= 0.0:
+        return None
+    return max(-120.0, min(0.0, 20.0 * np.log10(max(value, 1e-12))))
+
+
+def _peak_dbfs(x):
+    arr = np.asarray(x, dtype=np.float64)
+    if arr.size == 0:
+        return None
+    return _linear_to_dbfs(float(np.max(np.abs(arr))))
+
+
+def _rms_dbfs(x):
+    arr = np.asarray(x, dtype=np.float64)
+    if arr.size == 0:
+        return None
+    if arr.ndim == 1:
+        rms = float(np.sqrt(np.mean(arr * arr)))
+    else:
+        rms = float(np.max(np.sqrt(np.mean(arr * arr, axis=0))))
+    return _linear_to_dbfs(rms)
 
 
 def _read_wav_float(path_str):
