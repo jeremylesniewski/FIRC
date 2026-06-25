@@ -40,7 +40,7 @@ CORRECTION_HEADROOM_DB = -6.0
 # GUI
 class FIRFilterGUI(tk.Tk):
     def __init__(self):
-        super().__init__()
+        super().__init__(baseName="FIRC", className="FIRC")
         self.title(f"FIRC v{__version__}")
         self.resizable(True, True)
 
@@ -87,7 +87,7 @@ class FIRFilterGUI(tk.Tk):
         self.sr_status_var.set("Click Apply to set sample rate")
         self.sr_combo.bind('<<ComboboxSelected>>', lambda e: self.on_sr_change())
 
-        # init async (device enumeration can block; keep it off the UI thread)
+        # init async
         self.after(150, lambda: self._refresh_devices_async("all", on_done=self._finish_startup))
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)

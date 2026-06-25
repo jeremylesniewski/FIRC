@@ -3,7 +3,7 @@ set -euo pipefail
 
 PYTHON=${PYTHON:-python3}
 VENV='.venv'
-APP_NAME="FIRC v0.1.5"
+APP_NAME="FIRC"
 SCRIPT="FIRC.py"
 ICON_ICNS=icon/FIRC.icns
 
@@ -84,6 +84,8 @@ app = BUNDLE(
     icon='${ICON_ICNS}',
     bundle_identifier='com.github.jeremysalwen.firfiltercorrection',
     info_plist={
+        'CFBundleName': 'FIRC',
+        'CFBundleDisplayName': 'FIRC',
         'CFBundleShortVersionString': '${APP_VERSION}',
         'CFBundleVersion': '${APP_VERSION}',
         'NSMicrophoneUsageDescription': 'FIRC needs access to audio input devices.',
