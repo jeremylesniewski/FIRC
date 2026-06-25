@@ -21,12 +21,28 @@ def test_build_yaml_config_escapes_device_names_and_paths():
     config = yaml.safe_load(text)
 
     assert config["devices"]["samplerate"] == 48000
+    assert config["devices"]["chunksize"] == 1024
     assert config["devices"]["capture"]["device"] == 'BlackHole "2ch"'
     assert config["devices"]["playback"]["device"] == "USB Audio CODEC 'Main'"
     assert config["filters"]["fir_L"]["parameters"]["filename"] == '/tmp/left "quoted".wav'
     assert config["filters"]["fir_R"]["parameters"]["filename"] == "/tmp/right's.wav"
     assert config["filters"]["gain_in"]["parameters"]["gain"] == 1.23
     assert config["filters"]["gain_out"]["parameters"]["gain"] == -5.68
+
+
+def test_build_yaml_config_uses_selected_chunk_size():
+    text = _build_yaml_config(
+        48000,
+        "BlackHole 2ch",
+        "USB Audio",
+        "/tmp/left.wav",
+        "/tmp/right.wav",
+        chunk_size=512,
+    )
+
+    config = yaml.safe_load(text)
+
+    assert config["devices"]["chunksize"] == 512
 
 
 def test_default_resource_configs_use_relative_impulses():

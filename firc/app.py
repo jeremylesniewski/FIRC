@@ -35,6 +35,7 @@ from .runtime import (
 
 MIN_APP_WIDTH = 860
 CORRECTION_HEADROOM_DB = -6.0
+CHUNK_SIZE_VALUES = ("128", "256", "512", "1024", "2048", "4096")
 
 
 # GUI
@@ -54,7 +55,6 @@ class FIRFilterGUI(tk.Tk):
         self._ready_for_gain_updates = False
         self._refresh_in_progress = False
         self._camilla_starting = False
-        self._sr_apply_in_progress = False
         self._error_dialog_open = False
         self._pending_gain_job = None
         self.passthrough = None
@@ -83,9 +83,6 @@ class FIRFilterGUI(tk.Tk):
         # meter loop
         self.after(50, self._update_bottom_meter)
         self._sync_launch_btn()
-
-        self.sr_status_var.set("Click Apply to set sample rate")
-        self.sr_combo.bind('<<ComboboxSelected>>', lambda e: self.on_sr_change())
 
         # init async
         self.after(150, lambda: self._refresh_devices_async("all", on_done=self._finish_startup))
@@ -196,9 +193,10 @@ class FIRFilterGUI(tk.Tk):
         self.sr_var = tk.StringVar(value="48000")
         self.sr_combo = ttk.Combobox(sr_frame, textvariable=self.sr_var, values=["44100","48000"], width=10, state="readonly")
         self.sr_combo.pack(side=tk.LEFT, padx=5)
-        ttk.Button(sr_frame, text="Apply", width=12, command=self.apply_sample_rate).pack(side=tk.LEFT)
-        self.sr_status_var = tk.StringVar()
-        ttk.Label(sr_frame, textvariable=self.sr_status_var, font=("",9,"italic")).pack(side=tk.LEFT, padx=5)
+        ttk.Label(sr_frame, text="Chunksize:").pack(side=tk.LEFT, padx=(10, 0))
+        self.chunk_size_var = tk.StringVar(value="1024")
+        self.chunk_size_combo = ttk.Combobox(sr_frame, textvariable=self.chunk_size_var, values=CHUNK_SIZE_VALUES, width=8, state="readonly")
+        self.chunk_size_combo.pack(side=tk.LEFT, padx=5)
 
         fir_lr = ttk.Frame(fir_frame); fir_lr.grid(row=2, column=0, columnspan=5, sticky="ew", pady=5)
         ttk.Label(fir_lr, text="Left FIR:").grid(row=0, column=0, sticky="w", padx=5)
@@ -530,6 +528,7 @@ class FIRFilterGUI(tk.Tk):
             return False
 
         sr = int(self.sr_var.get() or 48000)
+        chunk_size = self._selected_chunk_size()
         cap, play = self._resolve_selected_devices()
         if not cap or not play:
             if show_message:
@@ -540,7 +539,7 @@ class FIRFilterGUI(tk.Tk):
         except Exception: pass
 
         try:
-            yaml_text = _build_yaml_config(sr, cap, play, left, right, 0.0, go)
+            yaml_text = _build_yaml_config(sr, cap, play, left, right, 0.0, go, chunk_size=chunk_size)
             CONFIG_INTERNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(CONFIG_INTERNAL_PATH, "w", encoding="utf-8") as f:
                 f.write(yaml_text)
@@ -841,7 +840,9 @@ class FIRFilterGUI(tk.Tk):
                 sr = devs.get("samplerate")
                 if isinstance(sr, int) and str(sr) in ("44100", "48000"):
                     self.sr_var.set(str(sr))
-                    self.sr_status_var.set(f"(loaded {sr}Hz from config)")
+                chunk_size = devs.get("chunksize")
+                if isinstance(chunk_size, int) and str(chunk_size) in CHUNK_SIZE_VALUES:
+                    self.chunk_size_var.set(str(chunk_size))
                 cap_name = devs.get("capture", {}).get("device")
                 play_name = devs.get("playback", {}).get("device")
                 if cap_name:
@@ -875,84 +876,6 @@ class FIRFilterGUI(tk.Tk):
         self._restart_audio_after_device_change()
         if on_done:
             on_done()
-
-    # SR helpers
-    def get_device_sample_rate(self, device_name):
-        out_sp, _, _ = run(["system_profiler", "SPAudioDataType"])
-        if out_sp:
-            found = False
-            for line in out_sp.splitlines():
-                line = line.strip()
-                if line.endswith(":"): found = (line[:-1].strip() == device_name)
-                elif found and "Current SampleRate:" in line:
-                    try: return int(line.split(":")[-1].strip())
-                    except ValueError: pass
-        return None
-
-    def set_device_sample_rate(self, device_name, sample_rate):
-        sa = which("SwitchAudioSource")
-        if not sa: return False, "SwitchAudioSource not installed"
-        max_attempts = 3; current_rate = None
-        for attempt in range(max_attempts):
-            _, _, rc = run([sa, "-r", str(sample_rate), "-n", device_name])
-            if rc == 0:
-                time.sleep(1.0)
-                current_rate = self.get_device_sample_rate(device_name)
-                if current_rate == sample_rate: return True, "OK"
-            if attempt < max_attempts - 1:
-                run([sa, "-t", "output", "-s", device_name]); time.sleep(0.5)
-                run([sa, "-r", str(sample_rate), "-n", device_name]); time.sleep(1.0)
-                current_rate = self.get_device_sample_rate(device_name)
-                if current_rate == sample_rate: return True, "OK"
-        return False, f"Failed after {max_attempts} attempts ({current_rate}Hz)"
-
-    def apply_sample_rate(self):
-        try:
-            new_rate = int(self.sr_var.get())
-        except ValueError:
-            self._show_dialog("error", "Invalid Rate", "Please select a valid sample rate")
-            return
-        if self._sr_apply_in_progress:
-            return
-        was_correction = self.proc_mode == "correction"
-        if self.proc is not None:
-            self._stop_if_running()
-        self._stop_passthrough()
-
-        self._sr_apply_in_progress = True
-        self.sr_status_var.set("Applying...")
-        cap = self.cap_var.get()
-        play = self.play_var.get()
-        threading.Thread(
-            target=self._apply_sample_rate_worker,
-            args=(new_rate, cap, play, was_correction),
-            daemon=True,
-            name="ApplySampleRate",
-        ).start()
-
-    def _apply_sample_rate_worker(self, new_rate, cap_name, play_name, was_correction):
-        errs = []
-        for dev_name, label in ((cap_name, "Input"), (play_name, "Output")):
-            if dev_name:
-                ok, msg = self.set_device_sample_rate(dev_name, new_rate)
-                if not ok:
-                    errs.append(f"{label}: {msg}")
-        self.after(0, lambda: self._finish_apply_sample_rate(new_rate, errs, was_correction))
-
-    def _finish_apply_sample_rate(self, new_rate, errs, was_correction):
-        self._sr_apply_in_progress = False
-        if errs:
-            self.sr_status_var.set("Some failed!")
-            self._show_dialog("error", "Sample Rate", "\n".join(errs))
-        else:
-            self.sr_status_var.set(f"{new_rate}Hz set")
-        if was_correction:
-            self._restart_audio_after_device_change(force_correction=True)
-        else:
-            self._ensure_passthrough_audio()
-        if _AUDIO_OK and _PLOT_OK and self._an_visible:
-            self.analyzer.stop()
-            self.analyzer.start()
 
     # FIR pickers
     def browse_fir_separate(self, channel):
@@ -1289,9 +1212,15 @@ class FIRFilterGUI(tk.Tk):
             self.after_cancel(self._pending_gain_job)
         self._pending_gain_job = self.after(500, self._apply_gain_update)
 
-    def on_sr_change(self):
-        new_rate = self.sr_var.get()
-        self.sr_status_var.set(f"Click Apply to set {new_rate}Hz")
+    def _selected_chunk_size(self):
+        try:
+            chunk_size = int(self.chunk_size_var.get() or 1024)
+        except ValueError:
+            chunk_size = 1024
+        if str(chunk_size) not in CHUNK_SIZE_VALUES:
+            chunk_size = 1024
+            self.chunk_size_var.set(str(chunk_size))
+        return chunk_size
 
     def on_close(self):
         try:

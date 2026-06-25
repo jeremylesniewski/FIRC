@@ -14,6 +14,7 @@ fi
 source "$VENV/bin/activate"
 VENV_PY="$(pwd)/$VENV/bin/python"
 APP_VERSION="$("$VENV_PY" -c "from firc import __version__; print(__version__)")"
+BUNDLE_NAME="${APP_NAME} v${APP_VERSION}"
 
 # --- Install deps
 "$VENV_PY" -m pip install --upgrade pip
@@ -80,7 +81,7 @@ exe = EXE(
 coll = COLLECT(exe, a.binaries, a.datas, name='$APP_NAME')
 app = BUNDLE(
     coll,
-    name='${APP_NAME}.app',
+    name='${BUNDLE_NAME}.app',
     icon='${ICON_ICNS}',
     bundle_identifier='com.github.jeremysalwen.firfiltercorrection',
     info_plist={
@@ -95,17 +96,17 @@ EOL
 
 # --- Build the app 
 "$VENV_PY" -m PyInstaller --noconfirm "${APP_NAME}.spec"
-echo "Build finished: dist/${APP_NAME}.app"
+echo "Build finished: dist/${BUNDLE_NAME}.app"
 
 # --- Optional codesign
 if [ -n "${CODESIGN_IDENTITY:-}" ]; then
   codesign --force --options runtime --timestamp \
     --sign "$CODESIGN_IDENTITY" \
-    "dist/$APP_NAME.app/Contents/MacOS/camilladsp"
+    "dist/$BUNDLE_NAME.app/Contents/MacOS/camilladsp"
 
   codesign --force --options runtime --timestamp \
     --sign "$CODESIGN_IDENTITY" \
-    "dist/$APP_NAME.app"
+    "dist/$BUNDLE_NAME.app"
 else
   echo "Skipping codesign. Set CODESIGN_IDENTITY to sign the app."
 fi

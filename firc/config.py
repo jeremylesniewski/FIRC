@@ -17,6 +17,7 @@ def _build_yaml_config(
     right_fir: str,
     gain_in_db: float = 0.0,
     gain_out_db: float = -6.0,
+    chunk_size: int = 1024,
 ) -> str:
     if not _YAML_OK:
         raise RuntimeError("PyYAML not available; cannot generate config.")
@@ -24,7 +25,7 @@ def _build_yaml_config(
     config = {
         'devices': {
             'samplerate': sr,
-            'chunksize': 1024,
+            'chunksize': chunk_size,
             'capture': {
                 'type': 'CoreAudio',
                 'device': cap_device,
